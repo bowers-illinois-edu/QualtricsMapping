@@ -1,0 +1,29 @@
+<!--
+  QualtricsMapping: Look & Feel > Header > Advanced
+
+  Paste this into your Qualtrics survey's Look & Feel > Header section
+  (click "Advanced" to see the HTML editor).
+
+  Before pasting:
+  1. Replace YOURGOOGLEMAPKEY with your Google Maps API key
+  2. Replace the bundle URL with wherever you host qualtrics-mapping.js
+     (e.g., your GitHub Pages URL)
+  3. Optionally change the language and region parameters
+-->
+
+<!-- Google Maps API with drawing library -->
+<script>
+if (typeof google === 'object' && typeof google.maps === 'object') {
+  // Already loaded (e.g., by another question or preview reload)
+} else {
+  var script = document.createElement("script");
+  script.type = "text/javascript";
+  // To localize: add &language=es&region=CL (or your language/region)
+  script.src = "https://maps.googleapis.com/maps/api/js?key=YOURGOOGLEMAPKEY&libraries=drawing";
+  document.body.appendChild(script);
+}
+</script>
+
+<!-- QualtricsMapping library bundle -->
+<!-- Host dist/qualtrics-mapping.js on GitHub Pages or your own server -->
+<script src="https://YOUR-USERNAME.github.io/QualtricsMapping/dist/qualtrics-mapping.js"></script>
