@@ -1,70 +1,74 @@
-// QualtricsMapping: Geocode Question JavaScript
-//
-// Paste this into the Question JavaScript editor for a text-entry
-// question that asks for the respondent's address or postal code.
-//
-// Setup in Qualtrics:
-//   1. Create a "Text Entry" question (single line)
-//   2. In Survey Flow, add embedded data fields BEFORE the block:
-//      lat, lon (leave values blank -- they are set by this code)
-//   3. Click the question's gear icon > Add JavaScript > paste this
+// QualtricsMapping: Geocode Question JavaScript (Q1)
+// Paste into Q1's JavaScript editor.
+// Uses the new Qualtrics API (setJSEmbeddedData, addOnReady).
 
-Qualtrics.SurveyEngine.addOnload(function () {
-  // --- CONFIGURATION ---
-  // Set your country code to restrict geocoding results.
-  // Use ISO 3166-1 alpha-2 codes: "US", "CL", "KE", "GB", etc.
-  // Set to null for unrestricted (worldwide) geocoding.
-  var COUNTRY = null;
-  // --- END CONFIGURATION ---
-
+Qualtrics.SurveyEngine.addOnReady(function () {
   var questionCtx = this;
-  questionCtx.disableNextButton();
+  var COUNTRY = null; // Set to "US", "CL", "KE", etc. to restrict geocoding
+  var GMAPS_KEY = "YOURGOOGLEMAPKEY";
+  var BUNDLE_URL = "https://bowers-illinois-edu.github.io/QualtricsMapping/dist/qualtrics-mapping.js";
 
-  var container = questionCtx.getQuestionContainer();
+  function loadScript(src, cb) {
+    var s = document.createElement("script"); s.src = src; s.onload = cb;
+    s.onerror = function () { console.error("QM: Failed to load: " + src); };
+    document.head.appendChild(s);
+  }
 
-  // Create a "Look up" button so the respondent confirms their entry
-  var lookupBtn = document.createElement("div");
-  lookupBtn.className = "mapbutton";
-  lookupBtn.style.cssText =
-    "display:inline-block; cursor:pointer; padding:8px 16px; " +
-    "margin:8px 0; background:#0078d4; color:white; border-radius:4px; " +
-    "font-size:16px;";
-  lookupBtn.innerHTML = "<b>Look up address</b>";
-  container.appendChild(lookupBtn);
+  function getTextFromDOM() {
+    var container = questionCtx.getQuestionContainer();
+    var ta = container.querySelector("textarea");
+    if (ta && ta.value) return ta.value;
+    var inp = container.querySelector("input[type='text']");
+    if (inp && inp.value) return inp.value;
+    return "";
+  }
 
-  // Status message area
-  var status = document.createElement("div");
-  status.style.cssText = "margin:8px 0; min-height:20px;";
-  container.appendChild(status);
+  function startGeocode() {
+    questionCtx.disableNextButton();
+    var container = questionCtx.getQuestionContainer();
 
-  lookupBtn.addEventListener("click", function () {
-    var address = questionCtx.getTextValue();
-    if (!address || address.trim() === "") {
-      status.textContent = "Please enter an address or postal code.";
-      return;
-    }
+    var lookupBtn = document.createElement("div");
+    lookupBtn.style.cssText = "display:inline-block; cursor:pointer; padding:8px 16px; margin:8px 0; background:#0078d4; color:white; border-radius:4px; font-size:16px;";
+    lookupBtn.innerHTML = "<b>Look up address</b>";
+    container.appendChild(lookupBtn);
 
-    status.textContent = "Looking up address...";
-    lookupBtn.style.opacity = "0.5";
+    var status = document.createElement("div");
+    status.style.cssText = "margin:8px 0; min-height:20px;";
+    container.appendChild(status);
 
-    var opts = {};
-    if (COUNTRY) {
-      opts.country = COUNTRY;
-    }
-
-    QMGeocode.geocodeAddress(address, opts, function (err, result) {
-      lookupBtn.style.opacity = "1";
-      if (err) {
-        status.textContent =
-          "Unable to find that address. Please check and try again.";
+    lookupBtn.addEventListener("click", function () {
+      var address = getTextFromDOM();
+      if (!address || address.trim() === "") {
+        status.textContent = "Please enter an address or postal code.";
         return;
       }
-
-      status.textContent =
-        "Address found. Click Next to continue.";
-      Qualtrics.SurveyEngine.setEmbeddedData("lat", result.lat);
-      Qualtrics.SurveyEngine.setEmbeddedData("lon", result.lng);
-      questionCtx.enableNextButton();
+      status.textContent = "Looking up address...";
+      lookupBtn.style.opacity = "0.5";
+      var opts = {};
+      if (COUNTRY) { opts.country = COUNTRY; }
+      QMGeocode.geocodeAddress(address, opts, function (err, result) {
+        lookupBtn.style.opacity = "1";
+        if (err) {
+          status.textContent = "Unable to find that address. Please check and try again.";
+          return;
+        }
+        status.textContent = "Address found. Click Next to continue.";
+        var latStr = String(result.lat);
+        var lonStr = String(result.lng);
+        Qualtrics.SurveyEngine.setJSEmbeddedData("lat", latStr);
+        Qualtrics.SurveyEngine.setJSEmbeddedData("lon", lonStr);
+        console.log("QM Q1: set lat=" + latStr + " lon=" + lonStr);
+        questionCtx.enableNextButton();
+      });
     });
-  });
+  }
+
+  if (typeof google === "object" && typeof google.maps === "object") {
+    if (typeof QMGeocode !== "undefined") { startGeocode(); }
+    else { loadScript(BUNDLE_URL, startGeocode); }
+  } else {
+    loadScript("https://maps.googleapis.com/maps/api/js?key=" + GMAPS_KEY + "&libraries=drawing", function () {
+      loadScript(BUNDLE_URL, startGeocode);
+    });
+  }
 });
