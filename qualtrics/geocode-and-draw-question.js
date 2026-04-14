@@ -1,9 +1,9 @@
 // QualtricsMapping: Combined Geocode + Drawing Question
-// Paste into a single Text/Graphic question's JavaScript editor.
+// Paste into a single Text Entry question's JavaScript editor.
 //
 // Flow: respondent types address -> clicks "Look up" -> map appears
-// below with Terra Draw active -> they draw polygon(s) -> click Done.
-// All on one page, no cross-page data transfer needed.
+// below with Terra Draw active -> they draw polygon(s) -> click Next.
+// Drawing data is saved automatically when the page submits.
 
 Qualtrics.SurveyEngine.addOnReady(function () {
   var questionCtx = this;
@@ -24,13 +24,16 @@ Qualtrics.SurveyEngine.addOnReady(function () {
   var OVERLAY_STYLE = { fillColor: "#3388ff", fillOpacity: 0.15, strokeColor: "#3388ff", strokeWeight: 2, strokeOpacity: 0.8 };
   var AUTO_SELECT_CONTAINING = true;
 
+  // Drawing state -- accessible to the page submit handler
+  var drawingCtx = null;
+  var drawingAssignments = {};
+
   function loadScript(src, cb) {
     var s = document.createElement("script"); s.src = src; s.onload = cb;
     s.onerror = function () { console.error("QM: Failed to load: " + src); };
     document.head.appendChild(s);
   }
 
-  // --- Read address from the question's text input ---
   function getTextFromDOM() {
     var container = questionCtx.getQuestionContainer();
     var ta = container.querySelector("textarea");
@@ -40,22 +43,37 @@ Qualtrics.SurveyEngine.addOnReady(function () {
     return "";
   }
 
+  // --- Save drawing data when the page submits (respondent clicks Next) ---
+  questionCtx.addOnPageSubmit(function () {
+    if (drawingCtx) {
+      QMDrawing.stopDrawing(drawingCtx);
+      var result = QMDrawing.collectResult(drawingCtx);
+
+      Qualtrics.SurveyEngine.setJSEmbeddedData("MapDrawing", result.coordinates);
+      Qualtrics.SurveyEngine.setJSEmbeddedData("zoom", String(result.zoom));
+      if (drawingAssignments) {
+        Qualtrics.SurveyEngine.setJSEmbeddedData("MapAssignments", JSON.stringify(drawingAssignments));
+        if (drawingAssignments.overlayCondition) {
+          Qualtrics.SurveyEngine.setJSEmbeddedData("overlayCondition", drawingAssignments.overlayCondition);
+        }
+      }
+      console.log("QM: saved MapDrawing (" + result.coordinates.length + " chars)");
+    }
+  });
+
   // --- Build the UI: address lookup, then map ---
   function buildUI() {
     var container = questionCtx.getQuestionContainer();
 
-    // Address lookup button
     var lookupBtn = document.createElement("div");
     lookupBtn.style.cssText = "display:inline-block; cursor:pointer; padding:8px 16px; margin:8px 0; background:#0078d4; color:white; border-radius:4px; font-size:16px;";
     lookupBtn.innerHTML = "<b>Look up address</b>";
     container.appendChild(lookupBtn);
 
-    // Status message
     var status = document.createElement("div");
     status.style.cssText = "margin:8px 0; min-height:20px;";
     container.appendChild(status);
 
-    // Map container (hidden until geocode succeeds)
     var mapArea = document.createElement("div");
     mapArea.style.display = "none";
     container.appendChild(mapArea);
@@ -79,18 +97,14 @@ Qualtrics.SurveyEngine.addOnReady(function () {
           return;
         }
 
-        // Store lat/lon in embedded data for downstream analysis
         Qualtrics.SurveyEngine.setJSEmbeddedData("lat", String(result.lat));
         Qualtrics.SurveyEngine.setJSEmbeddedData("lon", String(result.lng));
         console.log("QM: geocoded lat=" + result.lat + " lon=" + result.lng);
 
-        status.textContent = "Address found. Please draw your community on the map below.";
+        status.textContent = "Address found. Please draw your community on the map below, then click Next.";
 
-        // Show the map and start drawing -- all on this page
         mapArea.style.display = "block";
         startDrawing(mapArea, { lat: result.lat, lng: result.lng });
-
-        // Scroll the map into view on mobile
         mapArea.scrollIntoView({ behavior: "smooth", block: "start" });
       });
     });
@@ -107,6 +121,10 @@ Qualtrics.SurveyEngine.addOnReady(function () {
     var labels = QMI18n.getLabels(LANGUAGE, LABEL_OVERRIDES);
 
     var ctx = QMDrawing.createMapCanvas(mapArea, { lat: center.lat, lng: center.lng, zoom: zoom });
+
+    // Store for page submit handler
+    drawingCtx = ctx;
+    drawingAssignments = assignments;
 
     if (mapType !== "roadmap" && google.maps.MapTypeId[mapType.toUpperCase()]) {
       ctx.map.setMapTypeId(google.maps.MapTypeId[mapType.toUpperCase()]);
@@ -144,7 +162,7 @@ Qualtrics.SurveyEngine.addOnReady(function () {
       applyOverlay(OVERLAY_GEOJSON, "overlay");
     }
 
-    // --- Buttons ---
+    // --- Drawing buttons (no Done -- page Next handles submission) ---
     var buttons = QMDrawing.createButtons(ctx, labels);
     var bc = document.createElement("div");
     bc.style.zIndex = "1";
@@ -152,10 +170,9 @@ Qualtrics.SurveyEngine.addOnReady(function () {
     bc.appendChild(buttons.stop);
     bc.appendChild(buttons.delete);
     bc.appendChild(buttons.reset);
-    bc.appendChild(buttons.done);
+    // No Done button -- respondent clicks the standard Next page button
     ctx.map.controls[google.maps.ControlPosition.RIGHT_BOTTOM].push(bc);
 
-    // Start in drawing mode: show Stop, hide Draw and Delete
     buttons.draw.style.display = "none";
     buttons.stop.style.display = "inline-block";
     buttons.delete.style.display = "none";
@@ -181,23 +198,6 @@ Qualtrics.SurveyEngine.addOnReady(function () {
       buttons.draw.style.display = "none";
       buttons.stop.style.display = "inline-block";
       buttons.delete.style.display = "none";
-    });
-    buttons.done.addEventListener("click", function () {
-      QMDrawing.stopDrawing(ctx);
-      var result = QMDrawing.collectResult(ctx);
-      result.assignments = assignments;
-
-      Qualtrics.SurveyEngine.setJSEmbeddedData("MapDrawing", result.coordinates);
-      Qualtrics.SurveyEngine.setJSEmbeddedData("zoom", String(result.zoom));
-      if (result.assignments) {
-        Qualtrics.SurveyEngine.setJSEmbeddedData("MapAssignments", JSON.stringify(result.assignments));
-        if (result.assignments.overlayCondition) {
-          Qualtrics.SurveyEngine.setJSEmbeddedData("overlayCondition", result.assignments.overlayCondition);
-        }
-      }
-      console.log("QM: saved MapDrawing (" + result.coordinates.length + " chars)");
-      // Small delay lets Qualtrics flush embedded data before page transition
-      setTimeout(function() { questionCtx.clickNextButton(); }, 500);
     });
   }
 
