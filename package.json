@@ -2,7 +2,7 @@
   "name": "qualtricsmapping",
   "version": "1.0.0",
   "description": "This repository contains the javascript and other files for the Mapping Local Communities project where we hope to combine hand-drawn maps with  a Qualtrics survey.",
-  "main": "geocode.js",
+  "main": "src/geocode.js",
   "scripts": {
     "test": "jest",
     "build": "node build.js"

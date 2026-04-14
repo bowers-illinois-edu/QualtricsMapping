@@ -1,16 +1,21 @@
 """
 Parse, visualize, and describe map drawing data from Qualtrics exports.
 
-The researcher downloads a CSV from Qualtrics. One column contains the
-coordinate string from the map drawing. Other columns contain survey
-responses and experimental assignments. These functions turn that CSV
+The researcher downloads a CSV from Qualtrics. One column contains a WKT
+(Well-Known Text) geometry string from the map drawing. Other columns contain
+survey responses and experimental assignments. These functions turn that CSV
 into a GeoDataFrame ready for spatial analysis.
 
-Coordinate string format:
-    "lon lat,lon lat,lon lat;lon lat,lon lat,lon lat"
-    - Commas separate vertices within a polygon
-    - Semicolons separate multiple polygons
-    - Coordinates are WGS84 (EPSG:4326), longitude first
+WKT format:
+    Single polygon:   POLYGON((-88.24 40.12, -88.23 40.11, ..., -88.24 40.12))
+    Multiple:         MULTIPOLYGON(((...)), ((...)))
+    Empty:            "" (empty string)
+
+Coordinates are WGS84 (EPSG:4326), longitude first.
+
+Because the format is standard WKT, no custom parser is needed:
+    shapely.wkt.loads("POLYGON((-88.24 40.12, ...))")
+works out of the box.
 
 Requirements: pip install geopandas shapely matplotlib
          or:  uv add geopandas shapely matplotlib
@@ -25,18 +30,36 @@ from shapely.geometry import Polygon, GeometryCollection, mapping
 from shapely import wkt
 
 
-def parse_coordinate_string(coords_str):
+def parse_coordinate_string(coord_str):
     """Parse a coordinate string into a list of shapely Polygon objects.
 
+    Supports both WKT (current format) and the legacy "lon lat,lon lat;..."
+    format for backward compatibility with data collected before April 2026.
+
     Args:
-        coords_str: Coordinate string from the MapDrawing column.
+        coord_str: WKT or legacy coordinate string from MapDrawing column.
 
     Returns:
         List of shapely Polygon objects (may be empty).
     """
-    if not coords_str or not coords_str.strip():
+    if not coord_str or not coord_str.strip():
         return []
 
+    coord_str = coord_str.strip()
+
+    # Detect format: WKT starts with a geometry type keyword
+    if coord_str.startswith(("POLYGON", "MULTIPOLYGON", "GEOMETRYCOLLECTION")):
+        geom = wkt.loads(coord_str)
+        if geom.geom_type == "MultiPolygon":
+            return list(geom.geoms)
+        return [geom]
+
+    # Legacy format: "lon lat,lon lat;lon lat,lon lat"
+    return _parse_legacy_coordinate_string(coord_str)
+
+
+def _parse_legacy_coordinate_string(coords_str):
+    """Parse the pre-WKT coordinate format for backward compatibility."""
     polygons = []
     for poly_str in coords_str.split(";"):
         vertices = []
@@ -44,14 +67,11 @@ def parse_coordinate_string(coords_str):
             parts = vertex_str.strip().split(" ")
             lng, lat = float(parts[0]), float(parts[1])
             vertices.append((lng, lat))
-        # Close the ring if needed
         if len(vertices) > 0 and vertices[0] != vertices[-1]:
             vertices.append(vertices[0])
-        # Degenerate polygons: need at least 4 points (3 vertices + close)
         while len(vertices) < 4:
             vertices.append(vertices[0])
         polygons.append(Polygon(vertices))
-
     return polygons
 
 
@@ -60,14 +80,14 @@ def to_geodataframe(df, coord_col="MapDrawing"):
 
     Args:
         df: pandas DataFrame from a Qualtrics CSV export.
-        coord_col: Name of the column containing coordinate strings.
+        coord_col: Name of the column containing WKT strings.
 
     Returns:
         GeoDataFrame with one row per respondent, CRS set to EPSG:4326.
     """
     geometries = []
-    for coords_str in df[coord_col]:
-        polys = parse_coordinate_string(coords_str)
+    for wkt_str in df[coord_col]:
+        polys = parse_coordinate_string(wkt_str)
         if len(polys) == 0:
             geometries.append(GeometryCollection())  # empty geometry
         elif len(polys) == 1:
@@ -80,11 +100,11 @@ def to_geodataframe(df, coord_col="MapDrawing"):
 
 
 def parse_qualtrics_map_data(df, coord_col="MapDrawing", assignments_col=None):
-    """Full parsing: coordinates to geometry + unpack JSON assignments.
+    """Full parsing: WKT to geometry + unpack JSON assignments.
 
     Args:
         df: pandas DataFrame from a Qualtrics CSV export.
-        coord_col: Name of the coordinate string column.
+        coord_col: Name of the WKT string column.
         assignments_col: Optional name of the JSON assignments column.
 
     Returns:
@@ -93,7 +113,6 @@ def parse_qualtrics_map_data(df, coord_col="MapDrawing", assignments_col=None):
     gdf = to_geodataframe(df, coord_col=coord_col)
 
     if assignments_col and assignments_col in gdf.columns:
-        # Unpack JSON into separate columns
         assignments = gdf[assignments_col].apply(
             lambda x: json.loads(x) if isinstance(x, str) and x.strip() else {}
         )
@@ -115,7 +134,6 @@ def compute_spatial_descriptives(gdf):
     Returns:
         DataFrame with columns: area_m2, centroid_lat, centroid_lng.
     """
-    # Project to equal-area CRS for area computation
     gdf_proj = gdf.to_crs(epsg=6933)  # World Cylindrical Equal Area
 
     areas = []

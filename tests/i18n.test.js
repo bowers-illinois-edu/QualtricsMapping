@@ -22,7 +22,8 @@ describe("button label configuration", function () {
     expect(labels.stop).toBe("Stop");
     expect(labels.reset).toBe("Reset");
     expect(labels.done).toBe("Done");
-    expect(labels.deleteConfirm).toBeDefined();
+    // Delete button label for removing selected polygons
+    expect(labels.delete).toBeDefined();
   });
 
   test("returns Spanish labels for 'es'", function () {
@@ -63,9 +64,12 @@ describe("Google Maps API locale configuration", function () {
     expect(url).toContain("region=CL");
   });
 
-  test("includes the drawing library", function () {
+  test("does NOT request the deprecated drawing library", function () {
+    // The Google Maps Drawing library was removed May 2026.
+    // We use Terra Draw instead, so the Maps API URL should not
+    // include libraries=drawing.
     var url = i18n.buildMapsApiUrl("TESTKEY", {});
-    expect(url).toContain("libraries=drawing");
+    expect(url).not.toContain("libraries=drawing");
   });
 
   test("substitutes the provided API key", function () {

@@ -2,54 +2,86 @@
 # from Qualtrics survey exports.
 #
 # The researcher downloads a CSV from Qualtrics with one row per respondent.
-# One column contains the coordinate string from the map drawing exercise.
-# Other columns contain survey responses (randomized questions, conjoints,
-# etc.) and experimental assignment metadata (which overlay, zoom level, etc.).
+# One column contains a WKT (Well-Known Text) geometry string from the map
+# drawing exercise. Other columns contain survey responses and experimental
+# assignment metadata. These functions turn that CSV into an sf object ready
+# for spatial analysis merged with the survey response data.
 #
-# These functions turn that CSV into an sf object ready for spatial analysis
-# merged with the survey response data.
+# The WKT format means no custom parsing is needed:
+#   sf::st_as_sfc("POLYGON((-88.24 40.12, ...))", crs = 4326)
+# works out of the box. These helper functions add convenience for the full
+# workflow: parse, merge, describe, and visualize.
 
 library(sf)
 library(jsonlite)
 
-#' Parse a coordinate string into an sfc geometry collection.
+#' Parse a WKT coordinate string into an sfc geometry.
 #'
-#' The coordinate string format is:
-#'   "lon lat,lon lat,lon lat;lon lat,lon lat,lon lat"
-#' Commas separate vertices within a polygon, semicolons separate polygons.
+#' The MapDrawing column in the Qualtrics CSV contains WKT:
+#'   - Single polygon: POLYGON((-88.24 40.12, -88.23 40.11, ..., -88.24 40.12))
+#'   - Multiple:       MULTIPOLYGON(((...)), ((...)))
+#'   - Empty:          "" (empty string)
+#'
 #' Coordinates are in WGS84 (EPSG:4326), longitude first.
 #'
-#' @param coords_str A single coordinate string from the MapDrawing column.
-#' @return An sfc object containing polygon geometries, in WGS84.
-parse_coordinate_string <- function(coords_str) {
-  if (is.na(coords_str) || nchar(trimws(coords_str)) == 0) {
+#' @param wkt_str A single WKT string from the MapDrawing column.
+#' @return An sfc object containing the geometry, in WGS84.
+parse_coordinate_string <- function(coord_str) {
+  if (is.na(coord_str) || nchar(trimws(coord_str)) == 0) {
     return(st_sfc(crs = 4326))
   }
 
+  coord_str <- trimws(coord_str)
+
+  # Detect format: WKT starts with a geometry type keyword;
+  # the legacy format starts with a number (longitude).
+  is_wkt <- grepl("^(POLYGON|MULTIPOLYGON|GEOMETRYCOLLECTION)", coord_str)
+
+  if (is_wkt) {
+    # WKT: sf parses it natively
+    geom <- st_as_sfc(coord_str, crs = 4326)
+    # If MULTIPOLYGON, extract individual polygons
+    if (length(geom) == 1 && st_geometry_type(geom) == "MULTIPOLYGON") {
+      return(st_cast(geom, "POLYGON"))
+    }
+    return(geom)
+  }
+
+  # Legacy format: "lon lat,lon lat;lon lat,lon lat"
+  # Returns an sfc with one polygon per semicolon-separated group.
+  parse_legacy_coordinate_string(coord_str)
+}
+
+
+#' Parse the legacy (pre-WKT) coordinate string format.
+#'
+#' Format: "lon lat,lon lat,lon lat;lon lat,lon lat,lon lat"
+#' Commas separate vertices, semicolons separate polygons.
+#' This function exists for backward compatibility with data collected
+#' before the WKT migration.
+#'
+#' @param coords_str A legacy coordinate string.
+#' @return An sfc object.
+parse_legacy_coordinate_string <- function(coords_str) {
   poly_strings <- strsplit(coords_str, ";")[[1]]
   polygons <- lapply(poly_strings, function(ps) {
     vertex_strings <- strsplit(trimws(ps), ",")[[1]]
     coords <- do.call(rbind, lapply(vertex_strings, function(vs) {
       parts <- as.numeric(strsplit(trimws(vs), " ")[[1]])
-      # parts[1] = longitude, parts[2] = latitude
       c(parts[1], parts[2])
     }))
-    # Close the ring if not already closed (required for valid polygons)
+    # Close the ring
     if (nrow(coords) > 0 &&
       (coords[1, 1] != coords[nrow(coords), 1] ||
         coords[1, 2] != coords[nrow(coords), 2])) {
       coords <- rbind(coords, coords[1, ])
     }
-    # A polygon needs at least 4 points (3 vertices + closing point)
-    if (nrow(coords) < 4) {
-      # Degenerate polygon -- repeat points to make a valid ring
-      while (nrow(coords) < 4) {
-        coords <- rbind(coords, coords[1, ])
-      }
+    # Degenerate polygon guard
+    while (nrow(coords) < 4) {
+      coords <- rbind(coords, coords[1, ])
     }
     st_polygon(list(coords))
   })
-
   st_sfc(polygons, crs = 4326)
 }
 
@@ -57,18 +89,16 @@ parse_coordinate_string <- function(coords_str) {
 #' Convert a Qualtrics export data frame to an sf object.
 #'
 #' @param df A data.frame from read.csv() of the Qualtrics export.
-#' @param coord_col Name of the column containing coordinate strings.
+#' @param coord_col Name of the column containing WKT strings.
 #' @param assignments_col Optional: name of the column containing JSON
 #'   assignment metadata. If provided, the JSON is unpacked into columns.
 #' @return An sf object with one row per respondent.
 parse_qualtrics_map_data <- function(df, coord_col = "MapDrawing",
                                      assignments_col = NULL) {
-  # Parse each respondent's coordinate string into geometry
+  # Parse each respondent's WKT string into geometry
   geometries <- lapply(df[[coord_col]], parse_coordinate_string)
 
   # Combine: each respondent's geometry may have 0, 1, or many polygons.
-  # We collect them as GEOMETRYCOLLECTION for respondents with multiple
-  # polygons, or POLYGON for single, or GEOMETRY EMPTY for none.
   combined_geom <- lapply(geometries, function(geom) {
     if (length(geom) == 0) {
       st_geometrycollection()
@@ -92,7 +122,6 @@ parse_qualtrics_map_data <- function(df, coord_col = "MapDrawing",
       }
       jsonlite::fromJSON(json_str)
     })
-    # Find all unique keys across all respondents
     all_keys <- unique(unlist(lapply(assignments_list, names)))
     for (key in all_keys) {
       result[[key]] <- sapply(assignments_list, function(a) {
@@ -112,7 +141,7 @@ parse_qualtrics_map_data <- function(df, coord_col = "MapDrawing",
 #' and number of polygons drawn.
 #'
 #' @param sf_obj An sf object from parse_qualtrics_map_data().
-#' @return A data.frame with columns: area_m2, centroid_lat, centroid_lng, n_polygons.
+#' @return A data.frame with columns: area_m2, centroid_lat, centroid_lng.
 compute_spatial_descriptives <- function(sf_obj) {
   n <- nrow(sf_obj)
   area_m2 <- numeric(n)
@@ -126,7 +155,6 @@ compute_spatial_descriptives <- function(sf_obj) {
       centroid_lat[i] <- NA_real_
       centroid_lng[i] <- NA_real_
     } else {
-      # st_area returns area in m^2 for geographic CRS
       area_m2[i] <- as.numeric(st_area(geom))
       centroid <- st_centroid(geom)
       coords <- st_coordinates(centroid)
@@ -160,7 +188,7 @@ plot_respondent_map <- function(sf_obj, respondent_id) {
 }
 
 
-#' Plot all respondents' drawings in a single faceted map.
+#' Plot all respondents' drawings in a single map.
 #'
 #' @param sf_obj An sf object from parse_qualtrics_map_data().
 #' @return A ggplot object.

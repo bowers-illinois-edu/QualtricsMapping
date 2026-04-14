@@ -23,6 +23,15 @@ function createMockSurveyEngine() {
     getEmbeddedData: function (key) {
       return embeddedData[key];
     },
+
+    // New Qualtrics API (replaces deprecated setEmbeddedData/getEmbeddedData)
+    setJSEmbeddedData: function (key, value) {
+      embeddedData[key] = value;
+    },
+
+    getJSEmbeddedData: function (key) {
+      return embeddedData[key];
+    },
   };
 }
 

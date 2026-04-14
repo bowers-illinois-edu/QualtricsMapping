@@ -11,61 +11,182 @@
 /**
  * Polygon coordinate serialization, deserialization, and export.
  *
- * Format: "lon lat,lon lat,lon lat;lon lat,lon lat,lon lat"
- *   - Each vertex is "longitude<space>latitude" (lon first, matching GeoJSON convention)
- *   - Commas separate vertices within a polygon
- *   - Semicolons separate multiple polygons
+ * Storage format: WKT (Well-Known Text), the standard for geometry in
+ * tabular data. This is what gets stored in Qualtrics embedded data
+ * and appears in the researcher's CSV export.
  *
- * All coordinates are in WGS84 (EPSG:4326), which is what Google Maps uses.
+ *   Single polygon:   POLYGON((-88.24 40.12, -88.23 40.11, -88.22 40.12, -88.24 40.12))
+ *   Multiple:         MULTIPOLYGON(((-88 40, -88.1 40.1, -88 40)), ((-87 41, -87.1 41.1, -87 41)))
+ *   Empty:            (empty string)
+ *
+ * WKT uses longitude-first coordinate order (x y = lng lat), same as
+ * GeoJSON. All coordinates are in WGS84 (EPSG:4326).
+ *
+ * Why WKT instead of a custom format: every GIS tool reads WKT natively.
+ * In R: sf::st_as_sfc(wkt, crs = 4326). In Python: shapely.wkt.loads(wkt).
+ * In QGIS, PostGIS, etc. No custom parser needed.
  */
 
 (function (exports) {
-  /**
-   * Serialize an array of google.maps.Polygon objects to a coordinate string.
-   */
-  function serializePolygons(polygons) {
-    if (!polygons || polygons.length === 0) return "";
+  // --- WKT formatting helpers ---
 
-    return polygons
-      .map(function (poly) {
-        return poly
-          .getPath()
-          .getArray()
-          .map(function (latlng) {
-            return latlng.lng() + " " + latlng.lat();
-          })
-          .join(",");
+  /**
+   * Format an array of [lng, lat] pairs as a WKT ring string.
+   * Ensures the ring is closed (first == last) as WKT requires.
+   */
+  function formatWKTRing(coords) {
+    var ring = coords.slice();
+    if (
+      ring.length > 0 &&
+      (ring[0][0] !== ring[ring.length - 1][0] ||
+        ring[0][1] !== ring[ring.length - 1][1])
+    ) {
+      ring.push([ring[0][0], ring[0][1]]);
+    }
+    return ring
+      .map(function (c) {
+        return c[0] + " " + c[1];
       })
-      .join(";");
+      .join(", ");
   }
 
-  /**
-   * Deserialize a coordinate string into an array of polygon vertex arrays.
-   * Each polygon is an array of {lat, lng} objects.
-   */
-  function deserializePolygons(str) {
-    if (!str || str.trim() === "") return [];
+  // --- WKT parsing helpers ---
 
-    return str.split(";").map(function (polyStr) {
-      return polyStr.split(",").map(function (vertexStr) {
-        var parts = vertexStr.trim().split(" ");
-        return {
-          lng: parseFloat(parts[0]),
-          lat: parseFloat(parts[1]),
-        };
-      });
+  /**
+   * Parse "x1 y1, x2 y2, ..." into [{lng, lat}, ...].
+   */
+  function parseWKTCoords(str) {
+    return str.split(",").map(function (pair) {
+      var parts = pair.trim().split(/\s+/);
+      return { lng: parseFloat(parts[0]), lat: parseFloat(parts[1]) };
     });
   }
 
   /**
-   * Convert a coordinate string to a GeoJSON FeatureCollection.
-   *
-   * Why GeoJSON: it is the lingua franca of spatial data. R reads it with
-   * sf::st_read(), Python with geopandas.read_file(). No specialized
-   * parsers needed.
+   * Strip the closing vertex from a vertex array.
+   * WKT rings repeat the first vertex; our internal arrays do not.
    */
-  function toGeoJSON(coordinateString) {
-    var polygons = deserializePolygons(coordinateString);
+  function stripClosingVertex(vertices) {
+    if (
+      vertices.length > 1 &&
+      vertices[0].lat === vertices[vertices.length - 1].lat &&
+      vertices[0].lng === vertices[vertices.length - 1].lng
+    ) {
+      return vertices.slice(0, -1);
+    }
+    return vertices;
+  }
+
+  // --- Serialization ---
+
+  /**
+   * Serialize an array of google.maps.Polygon objects to a WKT string.
+   */
+  function serializePolygons(polygons) {
+    if (!polygons || polygons.length === 0) return "";
+
+    function getCoords(poly) {
+      return poly
+        .getPath()
+        .getArray()
+        .map(function (latlng) {
+          return [latlng.lng(), latlng.lat()];
+        });
+    }
+
+    if (polygons.length === 1) {
+      return "POLYGON((" + formatWKTRing(getCoords(polygons[0])) + "))";
+    }
+
+    var parts = polygons.map(function (poly) {
+      return "((" + formatWKTRing(getCoords(poly)) + "))";
+    });
+    return "MULTIPOLYGON(" + parts.join(", ") + ")";
+  }
+
+  /**
+   * Serialize an array of GeoJSON polygon features to a WKT string.
+   *
+   * Terra Draw produces GeoJSON features; this converts them to WKT
+   * for storage in Qualtrics embedded data. Downstream R/Python code
+   * reads WKT with standard libraries (sf::st_as_sfc, shapely.wkt.loads).
+   */
+  function serializeGeoJSONPolygons(features) {
+    if (!features || features.length === 0) return "";
+
+    var polygonFeatures = features.filter(function (f) {
+      return f.geometry && f.geometry.type === "Polygon";
+    });
+
+    if (polygonFeatures.length === 0) return "";
+
+    if (polygonFeatures.length === 1) {
+      return (
+        "POLYGON((" +
+        formatWKTRing(polygonFeatures[0].geometry.coordinates[0]) +
+        "))"
+      );
+    }
+
+    var parts = polygonFeatures.map(function (f) {
+      return "((" + formatWKTRing(f.geometry.coordinates[0]) + "))";
+    });
+    return "MULTIPOLYGON(" + parts.join(", ") + ")";
+  }
+
+  // --- Deserialization ---
+
+  /**
+   * Deserialize a WKT string into an array of polygon vertex arrays.
+   * Each polygon is an array of {lat, lng} objects (closing vertex stripped).
+   *
+   * Supports POLYGON, MULTIPOLYGON, and empty strings.
+   * Returns the outer ring only (holes are ignored for now).
+   */
+  function deserializePolygons(str) {
+    if (!str || str.trim() === "") return [];
+    str = str.trim();
+
+    if (str === "GEOMETRYCOLLECTION EMPTY") return [];
+
+    if (str.indexOf("MULTIPOLYGON") === 0) {
+      // MULTIPOLYGON(((x1 y1, ..., x1 y1)), ((x2 y2, ..., x2 y2)))
+      var body = str
+        .replace(/^MULTIPOLYGON\s*\(/, "")
+        .replace(/\)$/, "");
+      // Split on "))" + optional whitespace/comma + "((" to separate polygons
+      var polyStrings = body.split(/\)\)\s*,\s*\(\(/);
+      return polyStrings.map(function (ps) {
+        // Strip any remaining outer parens
+        ps = ps.replace(/^\(+/, "").replace(/\)+$/, "");
+        // Take only the outer ring (split on ring separator)
+        var ringStr = ps.split(/\)\s*,\s*\(/)[0];
+        return stripClosingVertex(parseWKTCoords(ringStr));
+      });
+    }
+
+    if (str.indexOf("POLYGON") === 0) {
+      // POLYGON((x1 y1, x2 y2, ..., x1 y1))
+      var match = str.match(/^POLYGON\s*\(\((.+)\)\)\s*$/);
+      if (!match) return [];
+      // Take only the outer ring
+      var ringStr = match[1].split(/\)\s*,\s*\(/)[0];
+      return [stripClosingVertex(parseWKTCoords(ringStr))];
+    }
+
+    return [];
+  }
+
+  // --- GeoJSON export ---
+
+  /**
+   * Convert a WKT string to a GeoJSON FeatureCollection.
+   *
+   * GeoJSON is the lingua franca of spatial data on the web. R reads
+   * it with sf::st_read(), Python with geopandas.read_file().
+   */
+  function toGeoJSON(wktString) {
+    var polygons = deserializePolygons(wktString);
 
     var features = polygons.map(function (vertices, idx) {
       // GeoJSON coordinates are [lng, lat] arrays
@@ -120,7 +241,6 @@
       centerLng: opts.center ? opts.center.lng : null,
       crs: "EPSG:4326",
     };
-    // Flatten assignment fields into the record
     if (opts.assignments) {
       var keys = Object.keys(opts.assignments);
       for (var i = 0; i < keys.length; i++) {
@@ -131,6 +251,7 @@
   }
 
   exports.serializePolygons = serializePolygons;
+  exports.serializeGeoJSONPolygons = serializeGeoJSONPolygons;
   exports.deserializePolygons = deserializePolygons;
   exports.toGeoJSON = toGeoJSON;
   exports.getCRS = getCRS;
@@ -300,20 +421,16 @@
     en: {
       draw: "Draw",
       stop: "Stop",
+      delete: "Delete",
       reset: "Reset",
       done: "Done",
-      deleteConfirm: "Do you want to delete this community?",
-      deleteYes: "Yes",
-      deleteNo: "No",
     },
     es: {
       draw: "Dibujar",
       stop: "Parar",
+      delete: "Eliminar",
       reset: "Reiniciar",
       done: "Listo",
-      deleteConfirm: "Desea eliminar esta comunidad?",
-      deleteYes: "Si",
-      deleteNo: "No",
     },
   };
 
@@ -343,7 +460,7 @@
    * Build the Google Maps JavaScript API URL with locale settings.
    */
   function buildMapsApiUrl(apiKey, opts) {
-    var params = ["key=" + apiKey, "libraries=drawing"];
+    var params = ["key=" + apiKey];
     if (opts.language) {
       params.push("language=" + opts.language);
     }
@@ -660,12 +777,16 @@
 
 // --- src/drawing.js ---
 /**
- * Interactive map drawing: create a map, manage polygon drawing, and
- * collect the result.
+ * Interactive map drawing: create a map, manage polygon drawing via
+ * Terra Draw, and collect the result.
  *
- * This module creates a Google Map with drawing tools inside a container
- * element. Respondents can draw one or more polygons, delete individual
- * polygons, reset all drawings, and submit when done.
+ * This module creates a Google Map with Terra Draw's polygon drawing
+ * tool inside a container element. Terra Draw replaces the deprecated
+ * Google Maps DrawingManager (removed May 2026). The base map is still
+ * Google Maps; only the drawing layer changed.
+ *
+ * Respondents can draw one or more polygons, select and delete
+ * individual polygons, reset all drawings, and submit when done.
  */
 
 (function (exports) {
@@ -679,9 +800,12 @@
   /**
    * Create a map canvas inside the given container element.
    *
+   * Initializes a Google Map for the base layer and a Terra Draw
+   * instance for polygon drawing on top of it.
+   *
    * @param {HTMLElement} container - DOM element to hold the map
    * @param {object} opts - { lat, lng, zoom }
-   * @returns {object} context with map, drawingManager, polygons array
+   * @returns {object} context with map, draw (TerraDraw), canvas, zoom
    */
   function createMapCanvas(container, opts) {
     var canvasStyle = layout.getCanvasStyle({
@@ -689,7 +813,6 @@
     });
     var interactionOpts = layout.getMapInteractionOptions();
 
-    // Create the map canvas div
     var canvas = document.createElement("div");
     canvas.id = "map_canvas";
     canvas.style.width = canvasStyle.width;
@@ -712,62 +835,98 @@
 
     var map = new google.maps.Map(canvas, mapOptions);
 
-    var drawingManager = new google.maps.drawing.DrawingManager({
-      drawingControl: false,
-      drawingControlOptions: {
-        drawingModes: [google.maps.drawing.OverlayType.POLYGON],
-      },
-      polygonOptions: { editable: true },
+    // Terra Draw provides the drawing UI, replacing DrawingManager.
+    // Polygon mode for drawing, select mode for choosing polygons to delete.
+    var draw = new TerraDraw({
+      adapter: new TerraDrawGoogleMapsAdapter({ map: map, lib: google.maps }),
+      modes: [
+        new TerraDrawPolygonMode(),
+        new TerraDrawSelectMode({
+          flags: {
+            polygon: {
+              feature: {
+                draggable: false,
+                coordinates: {
+                  midpoints: false,
+                  draggable: false,
+                },
+              },
+            },
+          },
+        }),
+      ],
     });
-    drawingManager.setMap(map);
+
+    draw.start();
     // Start in drawing mode so the respondent can begin immediately
-    drawingManager.setDrawingMode(google.maps.drawing.OverlayType.POLYGON);
+    draw.setMode("polygon");
 
     return {
       map: map,
-      drawingManager: drawingManager,
-      polygons: [],
+      draw: draw,
       canvas: canvas,
       zoom: opts.zoom,
     };
   }
 
   /**
-   * Add a completed polygon to the drawing context.
+   * Switch to polygon drawing mode.
    */
-  function addPolygon(ctx, polygon) {
-    ctx.polygons.push(polygon);
+  function startDrawing(ctx) {
+    ctx.draw.setMode("polygon");
   }
 
   /**
-   * Remove a specific polygon from the context and the map.
+   * Switch to select mode (for choosing polygons to delete).
    */
-  function removePolygon(ctx, polygon) {
-    polygon.setMap(null);
-    ctx.polygons = ctx.polygons.filter(function (p) {
-      return p !== polygon;
+  function stopDrawing(ctx) {
+    ctx.draw.setMode("select");
+  }
+
+  /**
+   * Remove the currently selected polygon, if any.
+   */
+  function deleteSelected(ctx) {
+    var selectedId = ctx.draw.getSelectedFeatureId
+      ? ctx.draw.getSelectedFeatureId()
+      : null;
+    if (selectedId != null) {
+      ctx.draw.removeFeatures([selectedId]);
+    }
+  }
+
+  /**
+   * Clear all polygons from the drawing.
+   */
+  function resetDrawing(ctx) {
+    ctx.draw.clear();
+  }
+
+  /**
+   * Return the current polygon features as a GeoJSON array.
+   */
+  function getFeatures(ctx) {
+    var snapshot = ctx.draw.getSnapshot();
+    return snapshot.filter(function (f) {
+      return f.geometry && f.geometry.type === "Polygon";
     });
   }
 
   /**
-   * Clear all polygons from the context and the map.
-   */
-  function resetPolygons(ctx) {
-    for (var i = 0; i < ctx.polygons.length; i++) {
-      ctx.polygons[i].setMap(null);
-    }
-    ctx.polygons = [];
-  }
-
-  /**
-   * Create the Draw/Stop/Reset/Done buttons.
+   * Create the Draw/Stop/Delete/Reset/Done buttons.
    * Returns an object with button elements.
    *
    * @param {object} ctx - drawing context from createMapCanvas
    * @param {object} labels - optional label overrides (from i18n.getLabels)
    */
   function createButtons(ctx, labels) {
-    labels = labels || { draw: "Draw", stop: "Stop", reset: "Reset", done: "Done" };
+    labels = labels || {
+      draw: "Draw",
+      stop: "Stop",
+      delete: "Delete",
+      reset: "Reset",
+      done: "Done",
+    };
     var btnSize = layout.getButtonSize({
       viewportWidth:
         typeof window !== "undefined" ? window.innerWidth : 375,
@@ -788,6 +947,7 @@
     return {
       draw: mkButton(labels.draw),
       stop: mkButton(labels.stop),
+      delete: mkButton(labels.delete),
       reset: mkButton(labels.reset),
       done: mkButton(labels.done),
     };
@@ -797,16 +957,19 @@
    * Collect the drawing result: coordinate string and zoom level.
    */
   function collectResult(ctx) {
+    var features = getFeatures(ctx);
     return {
-      coordinates: coordinates.serializePolygons(ctx.polygons),
+      coordinates: coordinates.serializeGeoJSONPolygons(features),
       zoom: ctx.zoom,
     };
   }
 
   exports.createMapCanvas = createMapCanvas;
-  exports.addPolygon = addPolygon;
-  exports.removePolygon = removePolygon;
-  exports.resetPolygons = resetPolygons;
+  exports.startDrawing = startDrawing;
+  exports.stopDrawing = stopDrawing;
+  exports.deleteSelected = deleteSelected;
+  exports.resetDrawing = resetDrawing;
+  exports.getFeatures = getFeatures;
   exports.createButtons = createButtons;
   exports.collectResult = collectResult;
 })(typeof module !== "undefined" ? module.exports : (this.QMDrawing = {}));
@@ -928,19 +1091,19 @@
    * }
    */
   function saveResults(engine, questionCtx, result) {
-    engine.setEmbeddedData("MapDrawing", result.coordinates);
-    engine.setEmbeddedData("zoom", result.zoom);
+    engine.setJSEmbeddedData("MapDrawing", result.coordinates);
+    engine.setJSEmbeddedData("zoom", result.zoom);
 
     if (result.assignments) {
       // Store full assignments as JSON for comprehensive analysis
-      engine.setEmbeddedData(
+      engine.setJSEmbeddedData(
         "MapAssignments",
         JSON.stringify(result.assignments)
       );
       // Also store overlayCondition as its own top-level field for
       // easy filtering in Qualtrics reports and quick analysis in R/Python
       if (result.assignments.overlayCondition != null) {
-        engine.setEmbeddedData(
+        engine.setJSEmbeddedData(
           "overlayCondition",
           result.assignments.overlayCondition
         );

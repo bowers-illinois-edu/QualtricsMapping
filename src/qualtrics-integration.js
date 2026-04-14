@@ -21,19 +21,19 @@
    * }
    */
   function saveResults(engine, questionCtx, result) {
-    engine.setEmbeddedData("MapDrawing", result.coordinates);
-    engine.setEmbeddedData("zoom", result.zoom);
+    engine.setJSEmbeddedData("MapDrawing", result.coordinates);
+    engine.setJSEmbeddedData("zoom", result.zoom);
 
     if (result.assignments) {
       // Store full assignments as JSON for comprehensive analysis
-      engine.setEmbeddedData(
+      engine.setJSEmbeddedData(
         "MapAssignments",
         JSON.stringify(result.assignments)
       );
       // Also store overlayCondition as its own top-level field for
       // easy filtering in Qualtrics reports and quick analysis in R/Python
       if (result.assignments.overlayCondition != null) {
-        engine.setEmbeddedData(
+        engine.setJSEmbeddedData(
           "overlayCondition",
           result.assignments.overlayCondition
         );

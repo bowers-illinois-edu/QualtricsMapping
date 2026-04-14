@@ -3,14 +3,14 @@
  *
  * Why these matter: The coordinate string is the primary data product of this
  * tool. It flows from the respondent's drawing into Qualtrics embedded data,
- * then into the researcher's R or Python analysis. If serialization is lossy,
- * ambiguous, or hard to parse downstream, the research data is compromised.
+ * then into the researcher's R or Python analysis. The format is WKT
+ * (Well-Known Text), a standard that every GIS tool reads natively:
+ *   - R: sf::st_as_sfc(wkt, crs = 4326)
+ *   - Python: shapely.wkt.loads(wkt)
+ *   - QGIS, PostGIS, etc.: native support
  *
- * The format must be:
- *   - Unambiguous: a parser can reconstruct exactly the polygons that were drawn
- *   - Precise: no rounding that would shift boundaries at neighborhood scale
- *   - Easy to parse in R and Python without specialized GIS libraries
- *   - Able to represent multiple polygons (a respondent might draw several areas)
+ * No custom parser needed. A collaborator receiving the Qualtrics CSV
+ * can immediately work with the geometry column.
  */
 
 var googleMaps = require("./mocks/google-maps");
@@ -22,12 +22,10 @@ afterAll(function () {
   googleMaps.uninstall();
 });
 
-// The module under test -- will be created in src/coordinates.js
 var coordinates = require("../src/coordinates");
 
-describe("serializePolygons", function () {
-  test("serializes a single triangle to 'lon lat,lon lat,lon lat'", function () {
-    // A triangle in Champaign, IL
+describe("serializePolygons (Google Maps objects to WKT)", function () {
+  test("serializes a single triangle as POLYGON WKT", function () {
     var poly = new google.maps.Polygon({
       paths: [
         new google.maps.LatLng(40.1164, -88.2434),
@@ -36,10 +34,12 @@ describe("serializePolygons", function () {
       ],
     });
     var result = coordinates.serializePolygons([poly]);
-    expect(result).toBe("-88.2434 40.1164,-88.2334 40.1064,-88.2234 40.1164");
+    expect(result).toBe(
+      "POLYGON((-88.2434 40.1164, -88.2334 40.1064, -88.2234 40.1164, -88.2434 40.1164))"
+    );
   });
 
-  test("serializes multiple polygons separated by semicolons", function () {
+  test("serializes multiple polygons as MULTIPOLYGON WKT", function () {
     var poly1 = new google.maps.Polygon({
       paths: [
         new google.maps.LatLng(40.0, -88.0),
@@ -53,7 +53,10 @@ describe("serializePolygons", function () {
       ],
     });
     var result = coordinates.serializePolygons([poly1, poly2]);
-    expect(result).toBe("-88 40,-88.1 40.1;-87 41,-87.1 41.1");
+    expect(result).toContain("MULTIPOLYGON(");
+    // Each polygon wrapped in double parens
+    expect(result).toContain("((-88 40");
+    expect(result).toContain("((-87 41");
   });
 
   test("returns empty string when no polygons are drawn", function () {
@@ -71,21 +74,37 @@ describe("serializePolygons", function () {
     expect(result).toContain("40.11641");
     expect(result).toContain("-88.24342");
   });
+
+  test("WKT ring is closed (first vertex repeated at end)", function () {
+    var poly = new google.maps.Polygon({
+      paths: [
+        new google.maps.LatLng(40.0, -88.0),
+        new google.maps.LatLng(40.1, -88.1),
+        new google.maps.LatLng(40.0, -88.1),
+      ],
+    });
+    var result = coordinates.serializePolygons([poly]);
+    // The ring should start and end with the same vertex
+    var match = result.match(/^POLYGON\(\((.+)\)\)$/);
+    var coords = match[1].split(", ");
+    expect(coords[0]).toBe(coords[coords.length - 1]);
+  });
 });
 
-describe("deserializePolygons", function () {
-  test("parses a coordinate string back into an array of polygon vertex arrays", function () {
-    var input = "-88.2434 40.1164,-88.2334 40.1064,-88.2234 40.1164";
+describe("deserializePolygons (WKT to vertex arrays)", function () {
+  test("parses POLYGON WKT into a single polygon vertex array", function () {
+    var input =
+      "POLYGON((-88.2434 40.1164, -88.2334 40.1064, -88.2234 40.1164, -88.2434 40.1164))";
     var result = coordinates.deserializePolygons(input);
-    // Should return array of polygons, each polygon is array of {lat, lng}
     expect(result).toHaveLength(1);
-    expect(result[0]).toHaveLength(3);
+    expect(result[0]).toHaveLength(3); // closing vertex stripped
     expect(result[0][0].lat).toBeCloseTo(40.1164, 4);
     expect(result[0][0].lng).toBeCloseTo(-88.2434, 4);
   });
 
-  test("parses multiple polygons separated by semicolons", function () {
-    var input = "-88 40,-88.1 40.1;-87 41,-87.1 41.1";
+  test("parses MULTIPOLYGON WKT into multiple polygon vertex arrays", function () {
+    var input =
+      "MULTIPOLYGON(((-88 40, -88.1 40.1, -88 40)), ((-87 41, -87.1 41.1, -87 41)))";
     var result = coordinates.deserializePolygons(input);
     expect(result).toHaveLength(2);
     expect(result[0]).toHaveLength(2);
@@ -97,7 +116,12 @@ describe("deserializePolygons", function () {
     expect(result).toEqual([]);
   });
 
-  test("round-trips without loss: serialize then deserialize recovers the vertices", function () {
+  test("returns empty array for GEOMETRYCOLLECTION EMPTY", function () {
+    var result = coordinates.deserializePolygons("GEOMETRYCOLLECTION EMPTY");
+    expect(result).toEqual([]);
+  });
+
+  test("round-trips without loss: serialize then deserialize recovers vertices", function () {
     var original = [
       new google.maps.Polygon({
         paths: [
@@ -118,36 +142,189 @@ describe("deserializePolygons", function () {
   });
 });
 
-describe("output format for downstream analysis", function () {
-  // Why: researchers will paste coordinate strings into R or Python.
-  // The format must be parseable without specialized GIS libraries.
+describe("GeoJSON export from WKT", function () {
+  // Why: researchers may also want GeoJSON for web visualizations
+  // or for tools that prefer JSON over WKT.
 
-  test("toGeoJSON converts polygons to a GeoJSON FeatureCollection", function () {
-    // GeoJSON is the lingua franca of spatial data. R (sf::st_read) and
-    // Python (geopandas.read_file) both parse it natively.
-    var input = "-88.2434 40.1164,-88.2334 40.1064,-88.2234 40.1164";
+  test("toGeoJSON converts POLYGON WKT to a GeoJSON FeatureCollection", function () {
+    var input =
+      "POLYGON((-88.2434 40.1164, -88.2334 40.1064, -88.2234 40.1164, -88.2434 40.1164))";
     var geojson = coordinates.toGeoJSON(input);
 
     expect(geojson.type).toBe("FeatureCollection");
     expect(geojson.features).toHaveLength(1);
     expect(geojson.features[0].geometry.type).toBe("Polygon");
-    // GeoJSON polygon rings must be closed (first vertex == last vertex)
+    // GeoJSON polygon rings must be closed
     var ring = geojson.features[0].geometry.coordinates[0];
     expect(ring[0]).toEqual(ring[ring.length - 1]);
   });
 
-  test("toGeoJSON handles multiple polygons as separate features", function () {
-    var input = "-88 40,-88.1 40.1,-88 40.1;-87 41,-87.1 41.1,-87 41.1";
+  test("toGeoJSON handles MULTIPOLYGON as separate features", function () {
+    var input =
+      "MULTIPOLYGON(((-88 40, -88.1 40.1, -88 40.1, -88 40)), ((-87 41, -87.1 41.1, -87 41.1, -87 41)))";
     var geojson = coordinates.toGeoJSON(input);
     expect(geojson.features).toHaveLength(2);
   });
 
   test("toGeoJSON uses [longitude, latitude] order per the GeoJSON spec", function () {
-    var input = "-88.2434 40.1164";
+    var input =
+      "POLYGON((-88.2434 40.1164, -88.2334 40.1064, -88.2434 40.1164))";
     var geojson = coordinates.toGeoJSON(input);
     var coord = geojson.features[0].geometry.coordinates[0][0];
     // GeoJSON: [lng, lat]
     expect(coord[0]).toBeCloseTo(-88.2434, 4);
     expect(coord[1]).toBeCloseTo(40.1164, 4);
+  });
+});
+
+describe("serializeGeoJSONPolygons (GeoJSON features to WKT)", function () {
+  // Why: Terra Draw produces GeoJSON features, but the storage format
+  // is WKT. This bridges the two. The output must be valid WKT that
+  // R (sf::st_as_sfc) and Python (shapely.wkt.loads) can parse.
+
+  test("serializes a single GeoJSON polygon as POLYGON WKT", function () {
+    var features = [
+      {
+        id: "1",
+        type: "Feature",
+        geometry: {
+          type: "Polygon",
+          coordinates: [
+            [
+              [-88.2434, 40.1164],
+              [-88.2334, 40.1064],
+              [-88.2234, 40.1164],
+              [-88.2434, 40.1164],
+            ],
+          ],
+        },
+        properties: { mode: "polygon" },
+      },
+    ];
+    var result = coordinates.serializeGeoJSONPolygons(features);
+    expect(result).toBe(
+      "POLYGON((-88.2434 40.1164, -88.2334 40.1064, -88.2234 40.1164, -88.2434 40.1164))"
+    );
+  });
+
+  test("serializes multiple GeoJSON polygons as MULTIPOLYGON WKT", function () {
+    var features = [
+      {
+        id: "1",
+        type: "Feature",
+        geometry: {
+          type: "Polygon",
+          coordinates: [
+            [
+              [-88.0, 40.0],
+              [-88.1, 40.1],
+              [-88.0, 40.0],
+            ],
+          ],
+        },
+        properties: {},
+      },
+      {
+        id: "2",
+        type: "Feature",
+        geometry: {
+          type: "Polygon",
+          coordinates: [
+            [
+              [-87.0, 41.0],
+              [-87.1, 41.1],
+              [-87.0, 41.0],
+            ],
+          ],
+        },
+        properties: {},
+      },
+    ];
+    var result = coordinates.serializeGeoJSONPolygons(features);
+    expect(result).toContain("MULTIPOLYGON(");
+  });
+
+  test("returns empty string for empty feature array", function () {
+    expect(coordinates.serializeGeoJSONPolygons([])).toBe("");
+  });
+
+  test("preserves decimal precision for neighborhood-scale accuracy", function () {
+    var features = [
+      {
+        id: "1",
+        type: "Feature",
+        geometry: {
+          type: "Polygon",
+          coordinates: [
+            [
+              [-88.24342, 40.11641],
+              [-88.23342, 40.10641],
+              [-88.24342, 40.11641],
+            ],
+          ],
+        },
+        properties: {},
+      },
+    ];
+    var result = coordinates.serializeGeoJSONPolygons(features);
+    expect(result).toContain("40.11641");
+    expect(result).toContain("-88.24342");
+  });
+
+  test("round-trips with deserializePolygons", function () {
+    var features = [
+      {
+        id: "1",
+        type: "Feature",
+        geometry: {
+          type: "Polygon",
+          coordinates: [
+            [
+              [-88.2434, 40.1164],
+              [-88.2334, 40.1064],
+              [-88.2234, 40.1164],
+              [-88.2434, 40.1164],
+            ],
+          ],
+        },
+        properties: {},
+      },
+    ];
+    var serialized = coordinates.serializeGeoJSONPolygons(features);
+    var recovered = coordinates.deserializePolygons(serialized);
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]).toHaveLength(3);
+    expect(recovered[0][0].lng).toBeCloseTo(-88.2434, 4);
+    expect(recovered[0][0].lat).toBeCloseTo(40.1164, 4);
+  });
+
+  test("filters out non-polygon features", function () {
+    var features = [
+      {
+        id: "1",
+        type: "Feature",
+        geometry: { type: "Point", coordinates: [-88.0, 40.0] },
+        properties: { mode: "point" },
+      },
+      {
+        id: "2",
+        type: "Feature",
+        geometry: {
+          type: "Polygon",
+          coordinates: [
+            [
+              [-88.0, 40.0],
+              [-88.1, 40.1],
+              [-88.0, 40.1],
+              [-88.0, 40.0],
+            ],
+          ],
+        },
+        properties: { mode: "polygon" },
+      },
+    ];
+    var result = coordinates.serializeGeoJSONPolygons(features);
+    expect(result).toContain("POLYGON(");
+    expect(result).not.toContain("MULTIPOLYGON");
   });
 });

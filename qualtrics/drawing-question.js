@@ -1,11 +1,13 @@
 // QualtricsMapping: Drawing Question JavaScript (Q2)
 // Paste into Q2's JavaScript editor.
 // Reads lat/lon via getJSEmbeddedData (NOT piped text).
+// Uses Terra Draw for polygon drawing (replaces deprecated DrawingManager).
 
 Qualtrics.SurveyEngine.addOnReady(function () {
   var questionCtx = this;
   var GMAPS_KEY = "YOURGOOGLEMAPKEY";
   var BUNDLE_URL = "https://bowers-illinois-edu.github.io/QualtricsMapping/dist/qualtrics-mapping.js";
+  var TERRADRAW_URL = "https://cdn.jsdelivr.net/npm/terra-draw/dist/terra-draw.umd.js";
   var LANGUAGE = "en";
   var LABEL_OVERRIDES = null;
   var SEED = "${e://Field/ResponseID}";
@@ -25,7 +27,6 @@ Qualtrics.SurveyEngine.addOnReady(function () {
   }
 
   function getCenter() {
-    // Read lat/lon set by Q1 via the new JS embedded data API
     var latStr = Qualtrics.SurveyEngine.getJSEmbeddedData("lat");
     var lonStr = Qualtrics.SurveyEngine.getJSEmbeddedData("lon");
     console.log("QM Q2: getJSEmbeddedData lat='" + latStr + "' lon='" + lonStr + "'");
@@ -74,29 +75,46 @@ Qualtrics.SurveyEngine.addOnReady(function () {
     } else if (OVERLAY_GEOJSON_URL) { loadOverlayFromUrl(OVERLAY_GEOJSON_URL, "overlay");
     } else if (OVERLAY_GEOJSON) { applyOverlay(OVERLAY_GEOJSON, "overlay"); }
 
+    // --- Button wiring ---
     var buttons = QMDrawing.createButtons(ctx, labels);
     var bc = document.createElement("div"); bc.style.zIndex = "1";
     bc.appendChild(buttons.draw); bc.appendChild(buttons.stop);
-    bc.appendChild(buttons.reset); bc.appendChild(buttons.done);
+    bc.appendChild(buttons.delete); bc.appendChild(buttons.reset);
+    bc.appendChild(buttons.done);
     ctx.map.controls[google.maps.ControlPosition.RIGHT_BOTTOM].push(bc);
-    buttons.draw.style.display = "none"; buttons.stop.style.display = "inline-block";
+
+    // Start in drawing mode: show Stop, hide Draw and Delete
+    buttons.draw.style.display = "none";
+    buttons.stop.style.display = "inline-block";
+    buttons.delete.style.display = "none";
 
     buttons.draw.addEventListener("click", function () {
-      ctx.drawingManager.setDrawingMode(google.maps.drawing.OverlayType.POLYGON);
-      buttons.draw.style.display = "none"; buttons.stop.style.display = "inline-block";
+      QMDrawing.startDrawing(ctx);
+      buttons.draw.style.display = "none";
+      buttons.stop.style.display = "inline-block";
+      buttons.delete.style.display = "none";
     });
     buttons.stop.addEventListener("click", function () {
-      ctx.drawingManager.setDrawingMode(null);
-      buttons.draw.style.display = "inline-block"; buttons.stop.style.display = "none";
+      QMDrawing.stopDrawing(ctx);
+      buttons.draw.style.display = "inline-block";
+      buttons.stop.style.display = "none";
+      buttons.delete.style.display = "inline-block";
+    });
+    buttons.delete.addEventListener("click", function () {
+      QMDrawing.deleteSelected(ctx);
     });
     buttons.reset.addEventListener("click", function () {
-      QMDrawing.resetPolygons(ctx); ctx.drawingManager.setDrawingMode(null);
-      buttons.draw.style.display = "inline-block"; buttons.stop.style.display = "none";
+      QMDrawing.resetDrawing(ctx);
+      // Return to drawing mode after reset
+      QMDrawing.startDrawing(ctx);
+      buttons.draw.style.display = "none";
+      buttons.stop.style.display = "inline-block";
+      buttons.delete.style.display = "none";
     });
     buttons.done.addEventListener("click", function () {
-      ctx.drawingManager.setDrawingMode(null);
-      var result = QMDrawing.collectResult(ctx); result.assignments = assignments;
-      // Store drawing via new API for Q3 to read
+      QMDrawing.stopDrawing(ctx);
+      var result = QMDrawing.collectResult(ctx);
+      result.assignments = assignments;
       Qualtrics.SurveyEngine.setJSEmbeddedData("MapDrawing", result.coordinates);
       Qualtrics.SurveyEngine.setJSEmbeddedData("zoom", String(result.zoom));
       if (result.assignments) {
@@ -108,25 +126,26 @@ Qualtrics.SurveyEngine.addOnReady(function () {
       console.log("QM Q2: saved MapDrawing (" + result.coordinates.length + " chars)");
       questionCtx.clickNextButton();
     });
-    google.maps.event.addListener(ctx.drawingManager, "polygoncomplete", function (poly) {
-      QMDrawing.addPolygon(ctx, poly);
-      google.maps.event.addListener(poly, "click", function (e) {
-        var content = document.createElement("div");
-        content.innerHTML = "<p>" + labels.deleteConfirm + "</p><p><button class='qm-delete-yes'>" + labels.deleteYes + "</button> <button class='qm-delete-no'>" + labels.deleteNo + "</button></p>";
-        var popup = new google.maps.InfoWindow({ content: content, position: e.latLng });
-        content.querySelector(".qm-delete-yes").addEventListener("click", function () { QMDrawing.removePolygon(ctx, poly); popup.close(); });
-        content.querySelector(".qm-delete-no").addEventListener("click", function () { popup.close(); });
-        popup.open(ctx.map);
-      });
-    });
+  }
+
+  // --- Script loading chain ---
+  // Load Google Maps (core only, no drawing library), then Terra Draw,
+  // then the QualtricsMapping bundle.
+  function ensureTerraDraw(cb) {
+    if (typeof TerraDraw !== "undefined") { cb(); return; }
+    loadScript(TERRADRAW_URL, cb);
+  }
+
+  function ensureBundle(cb) {
+    if (typeof QMDrawing !== "undefined") { cb(); return; }
+    loadScript(BUNDLE_URL, cb);
   }
 
   if (typeof google === "object" && typeof google.maps === "object") {
-    if (typeof QMDrawing !== "undefined") { startDrawing(); }
-    else { loadScript(BUNDLE_URL, startDrawing); }
+    ensureTerraDraw(function () { ensureBundle(startDrawing); });
   } else {
-    loadScript("https://maps.googleapis.com/maps/api/js?key=" + GMAPS_KEY + "&libraries=drawing", function () {
-      loadScript(BUNDLE_URL, startDrawing);
+    loadScript("https://maps.googleapis.com/maps/api/js?key=" + GMAPS_KEY, function () {
+      ensureTerraDraw(function () { ensureBundle(startDrawing); });
     });
   }
 });

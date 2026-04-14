@@ -1,0 +1,17 @@
+<!--These lines should be cut and pasted into the Look&Feel/Header/Advanced window for the survey as a whole -->
+<!-- You will need your own Google Maps API Key -->
+<script>
+ if (typeof google === 'object' && typeof google.maps === 'object') {
+        
+    } else {
+        var script = document.createElement("script");
+        script.type = "text/javascript";
+	    <!-- Uncomment out the next line for a Spanish language, Chile localized map (i.e. geocoding will be restricted to Chile)
+	    <!--   script.src = "https://maps.googleapis.com/maps/api/js?key=YOURGOOGLEMAPKEY&sensor=true&libraries=drawing&language=es&region=CL"; -->
+        script.src = "https://maps.googleapis.com/maps/api/js?key=YOURGOOGLEMAPKEY&sensor=true&libraries=drawing";
+        document.body.appendChild(script);
+    }
+
+</script><script src="//code.jquery.com/jquery-1.11.0.min.js"></script><script>
+  var $j = jQuery.noConflict();
+</script>

@@ -11,20 +11,16 @@
     en: {
       draw: "Draw",
       stop: "Stop",
+      delete: "Delete",
       reset: "Reset",
       done: "Done",
-      deleteConfirm: "Do you want to delete this community?",
-      deleteYes: "Yes",
-      deleteNo: "No",
     },
     es: {
       draw: "Dibujar",
       stop: "Parar",
+      delete: "Eliminar",
       reset: "Reiniciar",
       done: "Listo",
-      deleteConfirm: "Desea eliminar esta comunidad?",
-      deleteYes: "Si",
-      deleteNo: "No",
     },
   };
 
@@ -54,7 +50,7 @@
    * Build the Google Maps JavaScript API URL with locale settings.
    */
   function buildMapsApiUrl(apiKey, opts) {
-    var params = ["key=" + apiKey, "libraries=drawing"];
+    var params = ["key=" + apiKey];
     if (opts.language) {
       params.push("language=" + opts.language);
     }

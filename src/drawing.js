@@ -1,10 +1,14 @@
 /**
- * Interactive map drawing: create a map, manage polygon drawing, and
- * collect the result.
+ * Interactive map drawing: create a map, manage polygon drawing via
+ * Terra Draw, and collect the result.
  *
- * This module creates a Google Map with drawing tools inside a container
- * element. Respondents can draw one or more polygons, delete individual
- * polygons, reset all drawings, and submit when done.
+ * This module creates a Google Map with Terra Draw's polygon drawing
+ * tool inside a container element. Terra Draw replaces the deprecated
+ * Google Maps DrawingManager (removed May 2026). The base map is still
+ * Google Maps; only the drawing layer changed.
+ *
+ * Respondents can draw one or more polygons, select and delete
+ * individual polygons, reset all drawings, and submit when done.
  */
 
 (function (exports) {
@@ -18,9 +22,12 @@
   /**
    * Create a map canvas inside the given container element.
    *
+   * Initializes a Google Map for the base layer and a Terra Draw
+   * instance for polygon drawing on top of it.
+   *
    * @param {HTMLElement} container - DOM element to hold the map
    * @param {object} opts - { lat, lng, zoom }
-   * @returns {object} context with map, drawingManager, polygons array
+   * @returns {object} context with map, draw (TerraDraw), canvas, zoom
    */
   function createMapCanvas(container, opts) {
     var canvasStyle = layout.getCanvasStyle({
@@ -28,7 +35,6 @@
     });
     var interactionOpts = layout.getMapInteractionOptions();
 
-    // Create the map canvas div
     var canvas = document.createElement("div");
     canvas.id = "map_canvas";
     canvas.style.width = canvasStyle.width;
@@ -51,62 +57,98 @@
 
     var map = new google.maps.Map(canvas, mapOptions);
 
-    var drawingManager = new google.maps.drawing.DrawingManager({
-      drawingControl: false,
-      drawingControlOptions: {
-        drawingModes: [google.maps.drawing.OverlayType.POLYGON],
-      },
-      polygonOptions: { editable: true },
+    // Terra Draw provides the drawing UI, replacing DrawingManager.
+    // Polygon mode for drawing, select mode for choosing polygons to delete.
+    var draw = new TerraDraw({
+      adapter: new TerraDrawGoogleMapsAdapter({ map: map, lib: google.maps }),
+      modes: [
+        new TerraDrawPolygonMode(),
+        new TerraDrawSelectMode({
+          flags: {
+            polygon: {
+              feature: {
+                draggable: false,
+                coordinates: {
+                  midpoints: false,
+                  draggable: false,
+                },
+              },
+            },
+          },
+        }),
+      ],
     });
-    drawingManager.setMap(map);
+
+    draw.start();
     // Start in drawing mode so the respondent can begin immediately
-    drawingManager.setDrawingMode(google.maps.drawing.OverlayType.POLYGON);
+    draw.setMode("polygon");
 
     return {
       map: map,
-      drawingManager: drawingManager,
-      polygons: [],
+      draw: draw,
       canvas: canvas,
       zoom: opts.zoom,
     };
   }
 
   /**
-   * Add a completed polygon to the drawing context.
+   * Switch to polygon drawing mode.
    */
-  function addPolygon(ctx, polygon) {
-    ctx.polygons.push(polygon);
+  function startDrawing(ctx) {
+    ctx.draw.setMode("polygon");
   }
 
   /**
-   * Remove a specific polygon from the context and the map.
+   * Switch to select mode (for choosing polygons to delete).
    */
-  function removePolygon(ctx, polygon) {
-    polygon.setMap(null);
-    ctx.polygons = ctx.polygons.filter(function (p) {
-      return p !== polygon;
+  function stopDrawing(ctx) {
+    ctx.draw.setMode("select");
+  }
+
+  /**
+   * Remove the currently selected polygon, if any.
+   */
+  function deleteSelected(ctx) {
+    var selectedId = ctx.draw.getSelectedFeatureId
+      ? ctx.draw.getSelectedFeatureId()
+      : null;
+    if (selectedId != null) {
+      ctx.draw.removeFeatures([selectedId]);
+    }
+  }
+
+  /**
+   * Clear all polygons from the drawing.
+   */
+  function resetDrawing(ctx) {
+    ctx.draw.clear();
+  }
+
+  /**
+   * Return the current polygon features as a GeoJSON array.
+   */
+  function getFeatures(ctx) {
+    var snapshot = ctx.draw.getSnapshot();
+    return snapshot.filter(function (f) {
+      return f.geometry && f.geometry.type === "Polygon";
     });
   }
 
   /**
-   * Clear all polygons from the context and the map.
-   */
-  function resetPolygons(ctx) {
-    for (var i = 0; i < ctx.polygons.length; i++) {
-      ctx.polygons[i].setMap(null);
-    }
-    ctx.polygons = [];
-  }
-
-  /**
-   * Create the Draw/Stop/Reset/Done buttons.
+   * Create the Draw/Stop/Delete/Reset/Done buttons.
    * Returns an object with button elements.
    *
    * @param {object} ctx - drawing context from createMapCanvas
    * @param {object} labels - optional label overrides (from i18n.getLabels)
    */
   function createButtons(ctx, labels) {
-    labels = labels || { draw: "Draw", stop: "Stop", reset: "Reset", done: "Done" };
+    labels = labels || {
+      draw: "Draw",
+      stop: "Stop",
+      delete: "Delete",
+      reset: "Reset",
+      done: "Done",
+    };
     var btnSize = layout.getButtonSize({
       viewportWidth:
         typeof window !== "undefined" ? window.innerWidth : 375,
@@ -127,6 +169,7 @@
     return {
       draw: mkButton(labels.draw),
       stop: mkButton(labels.stop),
+      delete: mkButton(labels.delete),
       reset: mkButton(labels.reset),
       done: mkButton(labels.done),
     };
@@ -136,16 +179,19 @@
    * Collect the drawing result: coordinate string and zoom level.
    */
   function collectResult(ctx) {
+    var features = getFeatures(ctx);
     return {
-      coordinates: coordinates.serializePolygons(ctx.polygons),
+      coordinates: coordinates.serializeGeoJSONPolygons(features),
       zoom: ctx.zoom,
     };
   }
 
   exports.createMapCanvas = createMapCanvas;
-  exports.addPolygon = addPolygon;
-  exports.removePolygon = removePolygon;
-  exports.resetPolygons = resetPolygons;
+  exports.startDrawing = startDrawing;
+  exports.stopDrawing = stopDrawing;
+  exports.deleteSelected = deleteSelected;
+  exports.resetDrawing = resetDrawing;
+  exports.getFeatures = getFeatures;
   exports.createButtons = createButtons;
   exports.collectResult = collectResult;
 })(typeof module !== "undefined" ? module.exports : (this.QMDrawing = {}));

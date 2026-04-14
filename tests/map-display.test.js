@@ -17,35 +17,34 @@ afterAll(function () {
   googleMaps.uninstall();
 });
 
-// Module under test -- will be created in src/display.js
 var display = require("../src/display");
 
 describe("polygon display", function () {
-  test("renders polygons from a coordinate string onto a map", function () {
+  test("renders polygons from a WKT string onto a map", function () {
     var container = document.createElement("div");
-    var coordString = "-88.2434 40.1164,-88.2334 40.1064,-88.2234 40.1164";
-    var ctx = display.showMap(container, coordString);
-    // Map should have been created
+    var wkt =
+      "POLYGON((-88.2434 40.1164, -88.2334 40.1064, -88.2234 40.1164, -88.2434 40.1164))";
+    var ctx = display.showMap(container, wkt);
     expect(ctx.map).toBeDefined();
-    // Polygons should be on the map
     expect(ctx.polygons).toHaveLength(1);
     expect(ctx.polygons[0]._map).toBe(ctx.map);
   });
 
-  test("renders multiple polygons from semicolon-separated string", function () {
+  test("renders multiple polygons from MULTIPOLYGON WKT", function () {
     var container = document.createElement("div");
-    var coordString =
-      "-88 40,-88.1 40.1,-88 40.1;-87 41,-87.1 41.1,-87 41.1";
-    var ctx = display.showMap(container, coordString);
+    var wkt =
+      "MULTIPOLYGON(((-88 40, -88.1 40.1, -88 40.1, -88 40)), ((-87 41, -87.1 41.1, -87 41.1, -87 41)))";
+    var ctx = display.showMap(container, wkt);
     expect(ctx.polygons).toHaveLength(2);
   });
 
   test("display map is non-interactive (no dragging, no zoom controls)", function () {
-    // Why: the review map is a stimulus, not a tool. Letting the
+    // The review map is a stimulus, not a tool. Letting the
     // respondent pan away from their drawing defeats the purpose.
     var container = document.createElement("div");
-    var coordString = "-88 40,-88.1 40.1,-88 40.1";
-    var ctx = display.showMap(container, coordString);
+    var wkt =
+      "POLYGON((-88 40, -88.1 40.1, -88 40.1, -88 40))";
+    var ctx = display.showMap(container, wkt);
     expect(ctx.map._options.draggable).toBe(false);
     expect(ctx.map._options.disableDefaultUI).toBe(true);
     expect(ctx.map._options.scrollwheel).toBe(false);

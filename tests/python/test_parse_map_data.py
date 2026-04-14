@@ -3,16 +3,12 @@ Tests for Python code that parses, visualizes, and describes map drawing
 data from Qualtrics survey exports.
 
 Why these matter: Same rationale as the R tests -- the researcher's analysis
-pipeline must be able to ingest the coordinate strings, merge them with
-survey response data, and do spatial analysis. Some researchers will use
-Python (geopandas/shapely) instead of R (sf). Both paths must work.
+pipeline must be able to ingest WKT strings, merge them with survey response
+data, and do spatial analysis. Some researchers will use Python
+(geopandas/shapely) instead of R (sf). Both paths must work.
 
-The key integration point: the Qualtrics CSV has one row per respondent.
-Some columns are survey responses (possibly from randomized questions or
-conjoint experiments). One column is the map drawing coordinate string.
-Other columns record experimental assignments (which overlay was shown,
-what zoom level, etc.). The researcher needs all of this in one data
-structure for analysis.
+The format is WKT (Well-Known Text), so parsing is one line:
+    shapely.wkt.loads("POLYGON((-88.24 40.12, ...))")
 
 Run with: python -m pytest tests/python/test_parse_map_data.py -v
 Requires: pip install geopandas shapely matplotlib pytest
@@ -21,7 +17,6 @@ Requires: pip install geopandas shapely matplotlib pytest
 import json
 import pytest
 
-# Module under test -- will be created in python/parse_map_data.py
 import sys
 import os
 
@@ -37,12 +32,12 @@ from parse_map_data import (
 )
 
 
-# --- Fixture data ---
+# --- Fixture data (WKT format) ---
 
 SAMPLE_CSV_ROWS = [
     {
         "ResponseID": "R_abc123",
-        "MapDrawing": "-88.2434 40.1164,-88.2334 40.1064,-88.2234 40.1164",
+        "MapDrawing": "POLYGON((-88.2434 40.1164, -88.2334 40.1064, -88.2234 40.1164, -88.2434 40.1164))",
         "zoom": 14,
         "Q1_community_attachment": 4,
         "Q2_years_in_neighborhood": 10,
@@ -50,7 +45,7 @@ SAMPLE_CSV_ROWS = [
     },
     {
         "ResponseID": "R_def456",
-        "MapDrawing": "-88.25 40.12,-88.23 40.10,-88.21 40.12;-88.30 40.15,-88.28 40.13,-88.26 40.15",
+        "MapDrawing": "MULTIPOLYGON(((-88.25 40.12, -88.23 40.10, -88.21 40.12, -88.25 40.12)), ((-88.30 40.15, -88.28 40.13, -88.26 40.15, -88.30 40.15)))",
         "zoom": 12,
         "Q1_community_attachment": 5,
         "Q2_years_in_neighborhood": 2,
@@ -72,15 +67,14 @@ SAMPLE_CSV_ROWS = [
 
 class TestParseCoordinateString:
     def test_one_polygon(self):
-        coords = "-88.2434 40.1164,-88.2334 40.1064,-88.2234 40.1164"
-        result = parse_coordinate_string(coords)
-        # Should return a list of shapely Polygon objects
+        wkt = "POLYGON((-88.2434 40.1164, -88.2334 40.1064, -88.2234 40.1164, -88.2434 40.1164))"
+        result = parse_coordinate_string(wkt)
         assert len(result) == 1
         assert result[0].geom_type == "Polygon"
 
     def test_multiple_polygons(self):
-        coords = "-88.25 40.12,-88.23 40.10,-88.21 40.12;-88.30 40.15,-88.28 40.13,-88.26 40.15"
-        result = parse_coordinate_string(coords)
+        wkt = "MULTIPOLYGON(((-88.25 40.12, -88.23 40.10, -88.21 40.12, -88.25 40.12)), ((-88.30 40.15, -88.28 40.13, -88.26 40.15, -88.30 40.15)))"
+        result = parse_coordinate_string(wkt)
         assert len(result) == 2
 
     def test_empty_string(self):
@@ -88,21 +82,20 @@ class TestParseCoordinateString:
         assert len(result) == 0
 
     def test_longitude_first(self):
-        """The coordinate string uses lon-lat order. Verify we parse correctly."""
-        coords = "-88.2434 40.1164,-88.2334 40.1064,-88.2234 40.1164"
-        result = parse_coordinate_string(coords)
-        # Centroid should be near Champaign IL (lon ~ -88, lat ~ 40)
+        """WKT uses x y = longitude latitude order."""
+        wkt = "POLYGON((-88.2434 40.1164, -88.2334 40.1064, -88.2234 40.1164, -88.2434 40.1164))"
+        result = parse_coordinate_string(wkt)
         centroid = result[0].centroid
         assert centroid.x < -80  # longitude
         assert centroid.y > 30  # latitude
 
-    def test_precision_preserved(self):
-        coords = "-88.24342 40.11641"
-        result = parse_coordinate_string(coords)
-        # With only one point, we get a degenerate polygon, but the
-        # coordinate values should be preserved
-        bounds = result[0].bounds
-        assert abs(bounds[0] - (-88.24342)) < 0.0001
+    def test_standard_wkt_no_custom_parser_needed(self):
+        """shapely.wkt.loads handles it directly -- no custom code."""
+        from shapely import wkt as shapely_wkt
+        wkt = "POLYGON((-88.2434 40.1164, -88.2334 40.1064, -88.2234 40.1164, -88.2434 40.1164))"
+        geom = shapely_wkt.loads(wkt)
+        assert geom.geom_type == "Polygon"
+        assert not geom.is_empty
 
 
 # --- DataFrame conversion ---
@@ -132,9 +125,7 @@ class TestParseQualtricsCsv:
 
         df = pd.DataFrame(SAMPLE_CSV_ROWS)
         gdf = to_geodataframe(df, coord_col="MapDrawing")
-        # Row 3 had no drawing
         assert gdf.geometry.iloc[2].is_empty
-        # But survey data is preserved
         assert gdf.iloc[2]["Q1_community_attachment"] == 3
 
     def test_crs_is_wgs84(self):
@@ -182,7 +173,6 @@ class TestSpatialDescriptives:
         df = pd.DataFrame(SAMPLE_CSV_ROWS)
         gdf = to_geodataframe(df, coord_col="MapDrawing")
         desc = compute_spatial_descriptives(gdf)
-        # Respondent 1 drew a triangle -- area should be positive
         assert desc["area_m2"].iloc[0] > 0
 
     def test_computes_centroid(self):
@@ -193,7 +183,6 @@ class TestSpatialDescriptives:
         desc = compute_spatial_descriptives(gdf)
         assert "centroid_lat" in desc.columns
         assert "centroid_lng" in desc.columns
-        # Centroid should be near Champaign
         assert desc["centroid_lat"].iloc[0] > 30
 
     def test_empty_geometry_gets_nan_descriptives(self):
@@ -217,5 +206,4 @@ class TestVisualization:
         df = pd.DataFrame(SAMPLE_CSV_ROWS)
         gdf = to_geodataframe(df, coord_col="MapDrawing")
         fig = plot_respondent_map(gdf, respondent_id="R_abc123")
-        # Should return a matplotlib Figure
         assert fig is not None

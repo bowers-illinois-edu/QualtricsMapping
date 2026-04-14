@@ -1,24 +1,29 @@
 /**
- * Tests for the interactive map drawing experience.
+ * Tests for the interactive map drawing experience (Terra Draw version).
  *
  * Why these matter: The core purpose of this tool is to let survey respondents
  * draw polygons on a map representing something meaningful to them (e.g., "my
  * community"). The drawing interface must work reliably on phones in multiple
  * countries, and the resulting data must be faithfully recorded. A broken
  * drawing experience means no data; a confusing one means noisy data.
+ *
+ * This version tests the Terra Draw-based implementation, which replaces
+ * the deprecated Google Maps DrawingManager (removed May 2026). The base
+ * map is still Google Maps; only the drawing layer changed.
  */
 
 var googleMaps = require("./mocks/google-maps");
-var qualtricsMock = require("./mocks/qualtrics");
+var terraDraw = require("./mocks/terra-draw");
 
 beforeAll(function () {
   googleMaps.install();
+  terraDraw.install();
 });
 afterAll(function () {
+  terraDraw.uninstall();
   googleMaps.uninstall();
 });
 
-// Module under test -- will be created in src/drawing.js
 var drawing = require("../src/drawing");
 
 describe("map canvas creation", function () {
@@ -29,7 +34,6 @@ describe("map canvas creation", function () {
       lng: -88.2434,
       zoom: 14,
     });
-    // The map canvas div should exist in the container
     var canvas = container.querySelector("#map_canvas");
     expect(canvas).not.toBeNull();
     expect(ctx.map).toBeDefined();
@@ -42,7 +46,6 @@ describe("map canvas creation", function () {
       lng: -70.6693,
       zoom: 12,
     });
-    // The map should have been created with these center coordinates
     expect(ctx.map._options.center._lat).toBeCloseTo(-33.4489, 4);
     expect(ctx.map._options.center._lng).toBeCloseTo(-70.6693, 4);
   });
@@ -56,148 +59,197 @@ describe("map canvas creation", function () {
     });
     expect(ctx.map._options.zoom).toBe(16);
   });
-});
 
-describe("drawing controls", function () {
-  var container, ctx;
-
-  beforeEach(function () {
-    container = document.createElement("div");
-    ctx = drawing.createMapCanvas(container, {
-      lat: 40.0,
-      lng: -88.0,
-      zoom: 14,
-    });
-  });
-
-  test("provides Draw, Stop, Reset, and Done buttons", function () {
-    var buttons = drawing.createButtons(ctx);
-    expect(buttons.draw).toBeDefined();
-    expect(buttons.stop).toBeDefined();
-    expect(buttons.reset).toBeDefined();
-    expect(buttons.done).toBeDefined();
-  });
-
-  test("starts in drawing mode so the respondent can begin immediately", function () {
-    // Respondents on phones should not have to figure out how to start.
-    // Drawing mode should be active by default.
-    expect(ctx.drawingManager._mode).toBe("polygon");
-  });
-});
-
-describe("polygon drawing and management", function () {
-  var container, ctx;
-
-  beforeEach(function () {
-    container = document.createElement("div");
-    ctx = drawing.createMapCanvas(container, {
-      lat: 40.0,
-      lng: -88.0,
-      zoom: 14,
-    });
-  });
-
-  test("records a completed polygon", function () {
-    var poly = new google.maps.Polygon({
-      paths: [
-        new google.maps.LatLng(40.0, -88.0),
-        new google.maps.LatLng(40.1, -88.1),
-        new google.maps.LatLng(40.1, -88.0),
-      ],
-    });
-    drawing.addPolygon(ctx, poly);
-    expect(ctx.polygons).toHaveLength(1);
-  });
-
-  test("can draw multiple polygons", function () {
-    var poly1 = new google.maps.Polygon({
-      paths: [
-        new google.maps.LatLng(40.0, -88.0),
-        new google.maps.LatLng(40.1, -88.1),
-        new google.maps.LatLng(40.1, -88.0),
-      ],
-    });
-    var poly2 = new google.maps.Polygon({
-      paths: [
-        new google.maps.LatLng(41.0, -87.0),
-        new google.maps.LatLng(41.1, -87.1),
-        new google.maps.LatLng(41.1, -87.0),
-      ],
-    });
-    drawing.addPolygon(ctx, poly1);
-    drawing.addPolygon(ctx, poly2);
-    expect(ctx.polygons).toHaveLength(2);
-  });
-
-  test("reset clears all drawn polygons", function () {
-    var poly = new google.maps.Polygon({
-      paths: [
-        new google.maps.LatLng(40.0, -88.0),
-        new google.maps.LatLng(40.1, -88.1),
-        new google.maps.LatLng(40.1, -88.0),
-      ],
-    });
-    drawing.addPolygon(ctx, poly);
-    drawing.resetPolygons(ctx);
-    expect(ctx.polygons).toHaveLength(0);
-  });
-
-  test("reset removes polygons from the map, not just from the array", function () {
-    // Why: if polygons stay visible after reset, respondents see stale
-    // drawings and get confused about what they are submitting.
-    var poly = new google.maps.Polygon({
-      paths: [
-        new google.maps.LatLng(40.0, -88.0),
-        new google.maps.LatLng(40.1, -88.1),
-        new google.maps.LatLng(40.1, -88.0),
-      ],
-    });
-    poly.setMap(ctx.map);
-    drawing.addPolygon(ctx, poly);
-    drawing.resetPolygons(ctx);
-    // setMap(null) removes a polygon from the visible map
-    expect(poly._map).toBeNull();
-  });
-
-  test("deleting a specific polygon removes it but keeps others", function () {
-    var poly1 = new google.maps.Polygon({
-      paths: [new google.maps.LatLng(40.0, -88.0)],
-    });
-    var poly2 = new google.maps.Polygon({
-      paths: [new google.maps.LatLng(41.0, -87.0)],
-    });
-    drawing.addPolygon(ctx, poly1);
-    drawing.addPolygon(ctx, poly2);
-    drawing.removePolygon(ctx, poly1);
-    expect(ctx.polygons).toHaveLength(1);
-    expect(ctx.polygons[0]).toBe(poly2);
-    expect(poly1._map).toBeNull();
-  });
-});
-
-describe("done action", function () {
-  test("collects all polygon coordinates into a single string", function () {
+  test("initializes Terra Draw with polygon and select modes", function () {
+    // Terra Draw must support both drawing new polygons and
+    // selecting existing ones (for deletion).
     var container = document.createElement("div");
     var ctx = drawing.createMapCanvas(container, {
       lat: 40.0,
       lng: -88.0,
       zoom: 14,
     });
-    var poly = new google.maps.Polygon({
-      paths: [
-        new google.maps.LatLng(40.0, -88.0),
-        new google.maps.LatLng(40.1, -88.1),
-        new google.maps.LatLng(40.1, -88.0),
-      ],
+    expect(ctx.draw).toBeDefined();
+    expect(ctx.draw._started).toBe(true);
+  });
+
+  test("starts in polygon drawing mode so respondent can begin immediately", function () {
+    // Respondents on phones should not have to figure out how to start.
+    // Drawing mode should be active by default.
+    var container = document.createElement("div");
+    var ctx = drawing.createMapCanvas(container, {
+      lat: 40.0,
+      lng: -88.0,
+      zoom: 14,
     });
-    drawing.addPolygon(ctx, poly);
+    expect(ctx.draw.getMode()).toBe("polygon");
+  });
+});
+
+describe("drawing mode control", function () {
+  var container, ctx;
+
+  beforeEach(function () {
+    container = document.createElement("div");
+    ctx = drawing.createMapCanvas(container, {
+      lat: 40.0,
+      lng: -88.0,
+      zoom: 14,
+    });
+  });
+
+  test("startDrawing sets mode to polygon", function () {
+    drawing.stopDrawing(ctx);
+    drawing.startDrawing(ctx);
+    expect(ctx.draw.getMode()).toBe("polygon");
+  });
+
+  test("stopDrawing sets mode to select for polygon management", function () {
+    drawing.stopDrawing(ctx);
+    expect(ctx.draw.getMode()).toBe("select");
+  });
+});
+
+describe("drawing controls (buttons)", function () {
+  var container, ctx;
+
+  beforeEach(function () {
+    container = document.createElement("div");
+    ctx = drawing.createMapCanvas(container, {
+      lat: 40.0,
+      lng: -88.0,
+      zoom: 14,
+    });
+  });
+
+  test("provides Draw, Stop, Delete, Reset, and Done buttons", function () {
+    var buttons = drawing.createButtons(ctx);
+    expect(buttons.draw).toBeDefined();
+    expect(buttons.stop).toBeDefined();
+    expect(buttons.delete).toBeDefined();
+    expect(buttons.reset).toBeDefined();
+    expect(buttons.done).toBeDefined();
+  });
+
+  test("buttons have minimum 44px touch targets for mobile use", function () {
+    // Apple HIG requires 44px minimum for touch targets. Survey
+    // respondents in developing countries often use small, older phones.
+    var buttons = drawing.createButtons(ctx);
+    var minHeight = parseInt(buttons.draw.style.minHeight, 10);
+    var minWidth = parseInt(buttons.draw.style.minWidth, 10);
+    expect(minHeight).toBeGreaterThanOrEqual(44);
+    expect(minWidth).toBeGreaterThanOrEqual(44);
+  });
+});
+
+describe("polygon management", function () {
+  var container, ctx;
+
+  beforeEach(function () {
+    container = document.createElement("div");
+    ctx = drawing.createMapCanvas(container, {
+      lat: 40.0,
+      lng: -88.0,
+      zoom: 14,
+    });
+  });
+
+  test("records a completed polygon from Terra Draw", function () {
+    // Simulate a respondent drawing a triangle
+    ctx.draw._simulatePolygonComplete([
+      [-88.0, 40.0],
+      [-88.1, 40.1],
+      [-88.0, 40.1],
+    ]);
+    var features = drawing.getFeatures(ctx);
+    expect(features).toHaveLength(1);
+    expect(features[0].geometry.type).toBe("Polygon");
+  });
+
+  test("can draw multiple polygons", function () {
+    // A respondent might identify multiple disconnected areas as
+    // part of their community.
+    ctx.draw._simulatePolygonComplete([
+      [-88.0, 40.0],
+      [-88.1, 40.1],
+      [-88.0, 40.1],
+    ]);
+    ctx.draw._simulatePolygonComplete([
+      [-87.0, 41.0],
+      [-87.1, 41.1],
+      [-87.0, 41.1],
+    ]);
+    var features = drawing.getFeatures(ctx);
+    expect(features).toHaveLength(2);
+  });
+
+  test("resetDrawing clears all drawn polygons", function () {
+    ctx.draw._simulatePolygonComplete([
+      [-88.0, 40.0],
+      [-88.1, 40.1],
+      [-88.0, 40.1],
+    ]);
+    drawing.resetDrawing(ctx);
+    var features = drawing.getFeatures(ctx);
+    expect(features).toHaveLength(0);
+  });
+
+  test("deleteSelected removes the selected polygon but keeps others", function () {
+    var id1 = ctx.draw._simulatePolygonComplete([
+      [-88.0, 40.0],
+      [-88.1, 40.1],
+      [-88.0, 40.1],
+    ]);
+    ctx.draw._simulatePolygonComplete([
+      [-87.0, 41.0],
+      [-87.1, 41.1],
+      [-87.0, 41.1],
+    ]);
+    // Select the first polygon, then delete it
+    ctx.draw._simulateSelect(id1);
+    drawing.deleteSelected(ctx);
+    var features = drawing.getFeatures(ctx);
+    expect(features).toHaveLength(1);
+  });
+
+  test("deleteSelected does nothing when nothing is selected", function () {
+    ctx.draw._simulatePolygonComplete([
+      [-88.0, 40.0],
+      [-88.1, 40.1],
+      [-88.0, 40.1],
+    ]);
+    // No selection -- delete should be a no-op
+    drawing.deleteSelected(ctx);
+    var features = drawing.getFeatures(ctx);
+    expect(features).toHaveLength(1);
+  });
+});
+
+describe("result collection", function () {
+  test("collects all polygon coordinates as WKT", function () {
+    // The coordinate string is the primary data product. It uses WKT
+    // (Well-Known Text), which R, Python, QGIS, and PostGIS all read
+    // natively. No custom parser needed.
+    var container = document.createElement("div");
+    var ctx = drawing.createMapCanvas(container, {
+      lat: 40.0,
+      lng: -88.0,
+      zoom: 14,
+    });
+    ctx.draw._simulatePolygonComplete([
+      [-88.0, 40.0],
+      [-88.1, 40.1],
+      [-88.0, 40.1],
+    ]);
     var result = drawing.collectResult(ctx);
     expect(typeof result.coordinates).toBe("string");
-    expect(result.coordinates.length).toBeGreaterThan(0);
+    expect(result.coordinates).toMatch(/^POLYGON\(/);
+    // WKT uses longitude-first: "lng lat, lng lat, ..."
+    expect(result.coordinates).toContain("-88 40");
   });
 
   test("records the zoom level in the result", function () {
-    // Why: researchers need to know what zoom level the respondent saw,
+    // Researchers need to know what zoom level the respondent saw,
     // especially when zoom is experimentally varied.
     var container = document.createElement("div");
     var ctx = drawing.createMapCanvas(container, {
@@ -207,5 +259,61 @@ describe("done action", function () {
     });
     var result = drawing.collectResult(ctx);
     expect(result.zoom).toBe(17);
+  });
+
+  test("returns empty string when no polygons were drawn", function () {
+    // A respondent might click Done without drawing anything.
+    var container = document.createElement("div");
+    var ctx = drawing.createMapCanvas(container, {
+      lat: 40.0,
+      lng: -88.0,
+      zoom: 14,
+    });
+    var result = drawing.collectResult(ctx);
+    expect(result.coordinates).toBe("");
+  });
+
+  test("WKT output round-trips through deserialize", function () {
+    // The WKT string must be parseable by the same deserializer
+    // used by display.js. R and Python use their own WKT parsers.
+    var coordinates = require("../src/coordinates");
+    var container = document.createElement("div");
+    var ctx = drawing.createMapCanvas(container, {
+      lat: 40.0,
+      lng: -88.0,
+      zoom: 14,
+    });
+    ctx.draw._simulatePolygonComplete([
+      [-88.2434, 40.1164],
+      [-88.2334, 40.1064],
+      [-88.2234, 40.1164],
+    ]);
+    var result = drawing.collectResult(ctx);
+    var recovered = coordinates.deserializePolygons(result.coordinates);
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]).toHaveLength(3);
+    expect(recovered[0][0].lng).toBeCloseTo(-88.2434, 4);
+    expect(recovered[0][0].lat).toBeCloseTo(40.1164, 4);
+  });
+
+  test("multiple polygons produce MULTIPOLYGON WKT", function () {
+    var container = document.createElement("div");
+    var ctx = drawing.createMapCanvas(container, {
+      lat: 40.0,
+      lng: -88.0,
+      zoom: 14,
+    });
+    ctx.draw._simulatePolygonComplete([
+      [-88.0, 40.0],
+      [-88.1, 40.1],
+      [-88.0, 40.1],
+    ]);
+    ctx.draw._simulatePolygonComplete([
+      [-87.0, 41.0],
+      [-87.1, 41.1],
+      [-87.0, 41.1],
+    ]);
+    var result = drawing.collectResult(ctx);
+    expect(result.coordinates).toMatch(/^MULTIPOLYGON\(/);
   });
 });
