@@ -196,7 +196,8 @@ Qualtrics.SurveyEngine.addOnReady(function () {
         }
       }
       console.log("QM: saved MapDrawing (" + result.coordinates.length + " chars)");
-      questionCtx.clickNextButton();
+      // Small delay lets Qualtrics flush embedded data before page transition
+      setTimeout(function() { questionCtx.clickNextButton(); }, 500);
     });
   }
 
