@@ -837,11 +837,23 @@
 
     // Terra Draw provides the drawing UI, replacing DrawingManager.
     // Polygon mode for drawing, select mode for choosing polygons to delete.
-    var draw = new TerraDraw({
-      adapter: new TerraDrawGoogleMapsAdapter({ map: map, lib: google.maps }),
+    //
+    // The UMD bundles export to namespaced globals:
+    //   terraDraw.TerraDraw, terraDraw.TerraDrawPolygonMode, etc.
+    //   terraDrawGoogleMapsAdapter.TerraDrawGoogleMapsAdapter
+    // In Node (tests), the mock installs bare globals instead.
+    var TD = typeof terraDraw !== "undefined" ? terraDraw : {};
+    var TDClass = TD.TerraDraw || (typeof TerraDraw !== "undefined" ? TerraDraw : null);
+    var TDPolygon = TD.TerraDrawPolygonMode || (typeof TerraDrawPolygonMode !== "undefined" ? TerraDrawPolygonMode : null);
+    var TDSelect = TD.TerraDrawSelectMode || (typeof TerraDrawSelectMode !== "undefined" ? TerraDrawSelectMode : null);
+    var TDAdapter = (typeof terraDrawGoogleMapsAdapter !== "undefined" ? terraDrawGoogleMapsAdapter.TerraDrawGoogleMapsAdapter : null)
+      || (typeof TerraDrawGoogleMapsAdapter !== "undefined" ? TerraDrawGoogleMapsAdapter : null);
+
+    var draw = new TDClass({
+      adapter: new TDAdapter({ map: map, lib: google.maps }),
       modes: [
-        new TerraDrawPolygonMode(),
-        new TerraDrawSelectMode({
+        new TDPolygon(),
+        new TDSelect({
           flags: {
             polygon: {
               feature: {

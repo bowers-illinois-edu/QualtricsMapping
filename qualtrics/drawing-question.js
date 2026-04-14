@@ -7,7 +7,8 @@ Qualtrics.SurveyEngine.addOnReady(function () {
   var questionCtx = this;
   var GMAPS_KEY = "YOURGOOGLEMAPKEY";
   var BUNDLE_URL = "https://bowers-illinois-edu.github.io/QualtricsMapping/dist/qualtrics-mapping.js";
-  var TERRADRAW_URL = "https://cdn.jsdelivr.net/npm/terra-draw/dist/terra-draw.umd.js";
+  var TERRADRAW_URL = "https://unpkg.com/terra-draw/dist/terra-draw.umd.js";
+  var TERRADRAW_ADAPTER_URL = "https://unpkg.com/terra-draw-google-maps-adapter/dist/terra-draw-google-maps-adapter.umd.js";
   var LANGUAGE = "en";
   var LABEL_OVERRIDES = null;
   var SEED = "${e://Field/ResponseID}";
@@ -132,8 +133,13 @@ Qualtrics.SurveyEngine.addOnReady(function () {
   // Load Google Maps (core only, no drawing library), then Terra Draw,
   // then the QualtricsMapping bundle.
   function ensureTerraDraw(cb) {
-    if (typeof TerraDraw !== "undefined") { cb(); return; }
-    loadScript(TERRADRAW_URL, cb);
+    // Terra Draw core + Google Maps adapter are separate UMD bundles
+    function loadAdapter() {
+      if (typeof terraDrawGoogleMapsAdapter !== "undefined") { cb(); return; }
+      loadScript(TERRADRAW_ADAPTER_URL, cb);
+    }
+    if (typeof terraDraw !== "undefined") { loadAdapter(); return; }
+    loadScript(TERRADRAW_URL, loadAdapter);
   }
 
   function ensureBundle(cb) {
