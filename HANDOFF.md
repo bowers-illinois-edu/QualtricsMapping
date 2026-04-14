@@ -16,61 +16,66 @@ responses. Supports multi-country, multi-language deployment on phones.
 The Google Maps Drawing library was deprecated August 2025 and removed
 May 2026. Google's own documentation recommends Terra Draw as the
 replacement. Terra Draw is map-engine agnostic (works with Google Maps,
-Leaflet, MapLibre via adapters), has built-in touch support, ships as a
-UMD bundle on CDN (jsdelivr), and is MIT licensed.
+Leaflet, MapLibre via adapters), has built-in touch support, and is MIT
+licensed.
 
 We kept Google Maps as the base map (Phase 1). A future Phase 2 could
-switch to Leaflet to eliminate the API key dependency entirely -- Terra
-Draw's adapter pattern means the drawing code stays identical.
+switch to Leaflet to eliminate the API key dependency -- Terra Draw's
+adapter pattern means the drawing code stays identical.
 
-**Delete UX changed:** The old DrawingManager approach used a
-click-polygon-then-InfoWindow-popup to confirm deletion. The new approach
-uses Terra Draw's select mode plus a dedicated Delete button. This is
-cleaner on mobile (no popup, bigger touch targets).
+**Delete UX changed:** Select mode + dedicated Delete button replaces
+the old InfoWindow popup. Cleaner on mobile, bigger touch targets.
 
-**Button set changed:** Draw / Stop / Delete / Reset / Done (was
-Draw / Stop / Reset / Done). "Stop" switches to select mode; "Delete"
-removes the selected polygon.
+**Button set:** Draw / Stop / Delete / Reset / Done.
 
 ### 2. WKT replaces the custom coordinate string format
 
-The old format was a custom string: `"lon lat,lon lat;lon lat,lon lat"`.
-No GIS tool reads it natively. Every researcher needed custom R/Python
-parsing code.
+Old: `"lon lat,lon lat;lon lat,lon lat"` (custom, no tool reads natively).
+New: WKT (`POLYGON((...))`, `MULTIPOLYGON((...), (...))`).
 
-The new format is WKT (Well-Known Text), the standard for geometry in
-tabular data:
-- Single polygon: `POLYGON((-88.24 40.12, -88.23 40.11, -88.22 40.12, -88.24 40.12))`
-- Multiple polygons: `MULTIPOLYGON(((-88 40, ...)), ((-87 41, ...)))`
-- Empty: `""` (empty string)
-
-WKT is parseable with one line in any GIS tool:
+Parseable with one line in any GIS tool:
 - R: `sf::st_as_sfc(wkt_string, crs = 4326)`
 - Python: `shapely.wkt.loads(wkt_string)`
-- QGIS, PostGIS, etc.: native support
+- QGIS, PostGIS: native support
 
-No custom parser needed. A collaborator receiving the Qualtrics CSV can
-immediately work with the geometry column.
+R and Python analysis code simplified to use native WKT parsers. Both
+also support the legacy format for backward compatibility with old data.
 
-### 3. R and Python analysis code simplified
+### 3. Single-page geocode + draw
 
-Both `R/parse_map_data.R` and `python/parse_map_data.py` were rewritten
-to use native WKT parsing instead of custom string-splitting code. The
-`parse_coordinate_string` functions now delegate to `st_as_sfc()` and
-`wkt.loads()` respectively. The helper functions for merging with survey
-data, computing spatial descriptives, and plotting are unchanged.
+Q1 (geocode) and Q2 (draw) merged into one page. Respondent types
+address, clicks "Look up", map appears inline below, they draw, click
+Done. No cross-page embedded data transfer for lat/lon (passed directly
+in JS). Simpler code, fewer failure modes, better mobile UX.
 
-### 4. i18n labels updated
+Q3 (review) remains on a separate page.
 
-The `deleteConfirm` / `deleteYes` / `deleteNo` labels (for the old
-InfoWindow popup) were replaced with a single `delete` label (English:
-"Delete", Spanish: "Eliminar").
+### 4. Terra Draw CDN details (learned the hard way)
 
-The Maps API URL builder no longer includes `libraries=drawing`.
+The UMD bundles use **namespaced globals**, not bare constructors:
+- Core: `https://unpkg.com/terra-draw/dist/terra-draw.umd.js`
+  - Global: `window.terraDraw` (lowercase)
+  - Constructors: `terraDraw.TerraDraw`, `terraDraw.TerraDrawPolygonMode`, etc.
+- Google Maps adapter (separate package):
+  `https://unpkg.com/terra-draw-google-maps-adapter/dist/terra-draw-google-maps-adapter.umd.js`
+  - Global: `window.terraDrawGoogleMapsAdapter`
+  - Constructor: `terraDrawGoogleMapsAdapter.TerraDrawGoogleMapsAdapter`
 
-### 5. Prior decisions preserved
+jsdelivr does NOT host the adapter package. Use **unpkg** for both.
 
-These decisions from earlier sessions remain in effect:
+`draw.start()` **must** be called after the Google Map fires its `idle`
+event, not synchronously after `new google.maps.Map()`. The adapter
+attaches listeners to internal DOM elements that don't exist until the
+map renders.
+
+### 5. Qualtrics embedded data timing
+
+`setJSEmbeddedData()` needs time to flush before `clickNextButton()`
+fires. Without a delay, the next page's `getJSEmbeddedData()` returns
+empty. Fix: `setTimeout(function() { clickNextButton(); }, 500)`.
+
+### 6. Prior decisions preserved
+
 - Seeded PRNG (xorshift32) using ResponseID hashed via djb2
 - Overlay workflow: GeoJSON boundaries, client-side point-in-polygon
 - Qualtrics API: `setJSEmbeddedData` / `getJSEmbeddedData` / `addOnReady`
@@ -81,150 +86,119 @@ These decisions from earlier sessions remain in effect:
 
 ### Source modules (`src/`)
 
-- **`coordinates.js`** -- Complete rewrite. Serialization now produces WKT
-  (POLYGON/MULTIPOLYGON). Added `serializeGeoJSONPolygons()` for Terra Draw
-  output. WKT parser replaces the old custom-format deserializer. `toGeoJSON()`
-  now takes WKT input. Helper functions `formatWKTRing`, `parseWKTCoords`,
-  `stripClosingVertex` are internal.
+- **`coordinates.js`** -- Serialization produces WKT. Added
+  `serializeGeoJSONPolygons()` for Terra Draw output. WKT parser
+  replaces old custom deserializer. `toGeoJSON()` takes WKT input.
 
-- **`drawing.js`** -- Complete rewrite. Replaced `DrawingManager` with
-  Terra Draw (`TerraDrawGoogleMapsAdapter` + `TerraDrawPolygonMode` +
-  `TerraDrawSelectMode`). New API: `createMapCanvas` (returns `{map, draw,
-  canvas, zoom}`), `startDrawing`, `stopDrawing`, `deleteSelected`,
-  `resetDrawing`, `getFeatures`, `collectResult`, `createButtons`. Old
-  `addPolygon`/`removePolygon`/`resetPolygons` removed -- Terra Draw
-  manages its own feature store.
+- **`drawing.js`** -- Terra Draw replaces DrawingManager. Resolves
+  constructors from namespaced globals (`terraDraw.TerraDraw`, etc.)
+  with fallback to bare globals for test mocks. Defers `draw.start()`
+  until map `idle` event. New API: `createMapCanvas`, `startDrawing`,
+  `stopDrawing`, `deleteSelected`, `resetDrawing`, `getFeatures`,
+  `collectResult`, `createButtons`.
 
-- **`i18n.js`** -- Removed `libraries=drawing` from Maps API URL builder.
-  Replaced `deleteConfirm`/`deleteYes`/`deleteNo` labels with `delete` label.
+- **`i18n.js`** -- Removed `libraries=drawing` from Maps API URL.
+  `delete` label replaces `deleteConfirm`/`deleteYes`/`deleteNo`.
 
-- **`display.js`** -- UNCHANGED. Uses core Google Maps only (no Drawing lib).
+- **`qualtrics-integration.js`** -- Updated to use `setJSEmbeddedData`.
 
-- **`overlays.js`** -- UNCHANGED. Uses Google Maps Data layer + pure JS
-  ray casting.
-
-- **`geocode.js`** -- UNCHANGED.
-
-- **`randomization.js`** -- UNCHANGED.
-
-- **`layout.js`** -- UNCHANGED.
-
-- **`qualtrics-integration.js`** -- UNCHANGED (still uses old
-  `setEmbeddedData` -- see Remaining section).
+- **`display.js`**, **`overlays.js`**, **`geocode.js`**,
+  **`randomization.js`**, **`layout.js`** -- UNCHANGED.
 
 ### Qualtrics wiring (`qualtrics/`)
 
-- **`drawing-question.js`** -- Rewired for Terra Draw. Loads Terra Draw
-  from CDN (`cdn.jsdelivr.net/npm/terra-draw/dist/terra-draw.umd.js`).
-  Script loading chain: Google Maps (no drawing lib) -> Terra Draw ->
-  bundle. Five buttons (Draw/Stop/Delete/Reset/Done) with show/hide logic.
-  Delete button appears only in select mode.
+- **`geocode-and-draw-question.js`** -- NEW. Combined single-page flow:
+  address input + geocode + map + Terra Draw + Done. No cross-page data
+  transfer for lat/lon. 500ms delay before `clickNextButton()` to let
+  Qualtrics flush embedded data.
 
-- **`display-question.js`** -- Removed `&libraries=drawing` from Maps URL.
-  Otherwise unchanged.
+- **`drawing-question.js`** -- Updated for Terra Draw (kept for surveys
+  using the old two-page layout).
 
-- **`geocode-question.js`** -- UNCHANGED.
+- **`display-question.js`** -- Polls for embedded data up to 5 seconds
+  (fixes timing bug). Verbose console logging for debugging.
+
+- **`geocode-question.js`** -- UNCHANGED (kept for two-page layout).
 
 ### Analysis code
 
-- **`R/parse_map_data.R`** -- `parse_coordinate_string()` now uses
-  `st_as_sfc(wkt, crs = 4326)` instead of manual string parsing.
-  MULTIPOLYGON handled via `st_cast`. All other functions unchanged.
+- **`R/parse_map_data.R`** -- Native WKT parsing via `st_as_sfc()`.
+  Auto-detects and handles legacy format for backward compatibility.
 
-- **`python/parse_map_data.py`** -- `parse_coordinate_string()` now uses
-  `shapely.wkt.loads()`. MultiPolygon decomposed via `.geoms`. All other
-  functions unchanged.
+- **`python/parse_map_data.py`** -- Native WKT parsing via
+  `shapely.wkt.loads()`. Legacy format backward compatibility.
 
 - **`R/overlay_setup.R`** -- UNCHANGED.
 
 ### Tests
 
-- **`tests/mocks/terra-draw.js`** -- NEW. Mock for Terra Draw API:
-  `MockTerraDraw`, `MockGoogleMapsAdapter`, `MockPolygonMode`,
-  `MockSelectMode`. Test helpers: `_simulatePolygonComplete(coords)`,
-  `_simulateSelect(featureId)`.
+- **`tests/mocks/terra-draw.js`** -- NEW. Mock TerraDraw API with test
+  helpers `_simulatePolygonComplete()` and `_simulateSelect()`.
 
-- **`tests/coordinates.test.js`** -- Rewritten for WKT format.
-  Tests: serialize POLYGON/MULTIPOLYGON, deserialize WKT, round-trips,
-  GeoJSON export from WKT, serializeGeoJSONPolygons, precision, filtering.
+- **`tests/mocks/google-maps.js`** -- `addListenerOnce` fires callback
+  synchronously (simulates map `idle` event in tests).
 
-- **`tests/map-drawing.test.js`** -- Rewritten for Terra Draw API.
-  Tests: canvas creation, Terra Draw initialization, mode control,
-  buttons (5 including Delete), polygon management via Terra Draw,
-  WKT result collection, round-trips.
+- **`tests/mocks/qualtrics.js`** -- Added `setJSEmbeddedData` /
+  `getJSEmbeddedData` methods.
 
-- **`tests/map-display.test.js`** -- Updated: input strings are now WKT.
+- **`tests/coordinates.test.js`** -- WKT serialization/deserialization.
+- **`tests/map-drawing.test.js`** -- Terra Draw API, WKT output.
+- **`tests/map-display.test.js`** -- WKT input strings.
+- **`tests/data-export.test.js`** -- WKT format documentation tests.
+- **`tests/i18n.test.js`** -- `delete` label, no `libraries=drawing`.
+- **`tests/R/test-parse-map-data.R`** -- WKT + legacy format tests.
+- **`tests/python/test_parse_map_data.py`** -- WKT fixture data.
 
-- **`tests/data-export.test.js`** -- Rewritten: WKT format documentation
-  tests, buildExportRecord with WKT input.
+### Build and organization
 
-- **`tests/i18n.test.js`** -- Updated: `delete` label test, Maps URL
-  must NOT contain `libraries=drawing`.
-
-- **`tests/R/test-parse-map-data.R`** -- Rewritten: WKT fixture data,
-  added test for native `st_as_sfc()` parsing.
-
-- **`tests/python/test_parse_map_data.py`** -- Rewritten: WKT fixture
-  data, added test for native `shapely.wkt.loads()` parsing.
-
-- **All other test files** -- UNCHANGED.
-
-### Build
-
-- **`dist/qualtrics-mapping.js`** -- Rebuilt (34KB). Includes updated
-  coordinates.js, drawing.js, i18n.js. Terra Draw is NOT bundled -- it
-  loads from CDN separately.
+- **`dist/qualtrics-mapping.js`** -- Rebuilt (~35KB). Terra Draw loaded
+  separately from CDN (not bundled).
+- **`Archive/`** -- Legacy files moved here: `geocode.js` (root),
+  `lookfeelheader.html`, `mapinquestion.js`, `showmap.js`.
+- **`package.json`** -- `main` updated from root `geocode.js` to
+  `src/geocode.js`.
 
 ## Current Test Results
 
 ```
 JavaScript:  103 passed (10 suites)
-R parsing:    34 passed
+R parsing:    38 passed (including legacy format backward compat)
 R overlays:   18 passed
 Python:       needs pytest + geopandas installed to run
 ```
 
-## Current Blockers
+## No Current Blockers
 
-### BLOCKER: Q3 display JavaScript not executing in live survey
-
-**Status unchanged from previous session.** Q1 (geocode) and Q2 (drawing)
-work in the published survey. Q3's JavaScript does not appear to execute --
-no console messages, no errors, but a world map renders (so code partially
-runs).
-
-`Qualtrics.SurveyEngine.getJSEmbeddedData("MapDrawing")` typed manually
-in the console on Q3's page returns the WKT data. So the data is there,
-the code is there, but the code is not reading it successfully.
-
-**Likely cause:** The dynamic script loading chain resolves before
-`getJSEmbeddedData` is ready. The "google exists, QMDisplay exists" fast
-path may call `startDisplay` synchronously before the Qualtrics API is
-fully initialized.
-
-**Fix to try:** Add `setTimeout(startDisplay, 100)` or wrap in a
-try/catch with console logging to see if `getJSEmbeddedData` throws.
-
-**Test survey:**
-- Published: `https://illinois.qualtrics.com/jfe/form/SV_cFIH1gSZT0cBgTI`
-- Editor: `https://illinois.qualtrics.com/survey-builder/SV_cFIH1gSZT0cBgTI/edit`
+The previous Q3 display bug is fixed (data polling + embedded data
+flush delay). The full survey flow works end-to-end in the published
+survey.
 
 ## Important Context
 
-### Terra Draw CDN loading
+### Live survey structure (as of this session)
 
-Terra Draw is loaded from:
-`https://cdn.jsdelivr.net/npm/terra-draw/dist/terra-draw.umd.js`
+The published survey at
+`https://illinois.qualtrics.com/jfe/form/SV_cFIH1gSZT0cBgTI`
+has this structure:
 
-This creates global constructors: `TerraDraw`,
-`TerraDrawGoogleMapsAdapter`, `TerraDrawPolygonMode`,
-`TerraDrawSelectMode`, etc.
+- **Q1** (Text Entry): "Please enter your address or postal code, then
+  draw your community on the map" -- combined geocode + draw JS
+- **Page Break**
+- **Q3** (Text/Graphic): "Please review your drawing below" -- display JS
 
-The `drawing-question.js` script loading chain is:
-1. Google Maps JS API (core only, no `libraries=drawing`)
-2. Terra Draw UMD bundle
-3. QualtricsMapping bundle (`dist/qualtrics-mapping.js`)
-4. Call `startDrawing()`
+Q2 was deleted (merged into Q1). The survey editor is at:
+`https://illinois.qualtrics.com/survey-builder/SV_cFIH1gSZT0cBgTI/edit`
+
+### Script loading chain (Q1 combined question)
+
+```
+Google Maps JS API (core, no drawing library)
+  -> Terra Draw core (unpkg.com/terra-draw/.../terra-draw.umd.js)
+    -> Terra Draw Google Maps adapter (unpkg.com/terra-draw-google-maps-adapter/...)
+      -> QualtricsMapping bundle (GitHub Pages, ?v=2 cache bust)
+        -> buildUI() creates address input + Look up button
+          -> on geocode success: startDrawing() creates map + Terra Draw
+```
 
 ### WKT format details
 
@@ -250,18 +224,17 @@ createButtons(ctx, labels)        // -> { draw, stop, delete, reset, done }
 
 ### Qualtrics "New Survey Taking Experience" gotchas
 
-These were discovered through earlier debugging and still apply:
-
 1. `setEmbeddedData` / `getEmbeddedData` are deprecated -- use
    `setJSEmbeddedData` / `getJSEmbeddedData`.
 2. Piped text does NOT work for JS-set embedded data -- must use
    `getJSEmbeddedData` on the consuming page.
-3. Preview mode destroys iframes between pages -- only published
+3. `setJSEmbeddedData` needs ~500ms before `clickNextButton()` to flush.
+4. Preview mode destroys iframes between pages -- only published
    survey works for cross-page data.
-4. CKEditor strips script tags -- load scripts dynamically.
-5. `getTextValue()` unreliable -- read from DOM directly.
-6. `addOnReady` preferred over `addOnload`.
-7. No Prototype.js -- use native DOM methods only.
+5. CKEditor strips script tags -- load scripts dynamically.
+6. `getTextValue()` unreliable -- read from DOM directly.
+7. `addOnReady` preferred over `addOnload`.
+8. No Prototype.js -- use native DOM methods only.
 
 ### User's Google Maps API Key
 
@@ -275,58 +248,49 @@ into the Qualtrics question JavaScript (NOT in any repo files). The
 - `upstream` = `git@github.com:bowers-illinois-edu/QualtricsMapping.git`
   (push access, GitHub Pages serves from here)
 
+### Bundle cache busting
+
+The Qualtrics question JS loads the bundle with `?v=2`. When deploying
+bundle updates, increment this version number in the Qualtrics editor
+to bypass browser caching.
+
 ## What's Done vs. What Remains
 
 ### Done
 
-- [x] Terra Draw migration: drawing.js rewritten, tests passing (103 JS tests)
-- [x] WKT coordinate format: coordinates.js, all serialization/deserialization
-- [x] R analysis code simplified to use native WKT parsing (34 tests passing)
-- [x] Python analysis code simplified to use native WKT parsing
+- [x] Terra Draw migration (replaces deprecated DrawingManager)
+- [x] WKT coordinate format (standard, no custom parser needed)
+- [x] Combined geocode + draw on single page
+- [x] Q3 display timing bug fixed (polls for data, 500ms flush delay)
+- [x] R analysis code: native WKT + legacy backward compat (38 tests)
+- [x] Python analysis code: native WKT + legacy backward compat
 - [x] R overlay code unchanged and passing (18 tests)
-- [x] i18n updated: delete label, no drawing library in Maps URL
-- [x] Qualtrics drawing-question.js rewired for Terra Draw + WKT
-- [x] Qualtrics display-question.js: removed drawing library from Maps URL
+- [x] i18n: delete label, no drawing library in Maps URL
+- [x] qualtrics-integration.js updated to setJSEmbeddedData
 - [x] Terra Draw mock for testing
-- [x] Bundle rebuilt and ready for deployment
-- [x] All data-export tests updated for WKT format
-- [x] Q1 geocoding works in published survey
-- [x] Q2 map drawing works in published survey (needs redeployment with
-      new bundle for Terra Draw version)
+- [x] 103 JavaScript tests passing
+- [x] Bundle deployed to GitHub Pages
+- [x] Live survey updated, published, and verified end-to-end
+- [x] Legacy files moved to Archive/
 
 ### Remaining
 
-- [ ] **Fix Q3 display** -- data IS available via getJSEmbeddedData on Q3
-      page (confirmed manually). Code runs partially (world map renders).
-      Need to debug timing issue with script loading fast path.
-- [ ] **Q3 should match Q2's view** -- show same center and zoom as Q2,
-      not just fit-to-bounds. Q2 stores zoom via setJSEmbeddedData. Also
-      need to store center lat/lng. The review map should look like what
-      the respondent saw.
-- [ ] **Deploy updated bundle** -- push updated `dist/qualtrics-mapping.js`
-      to GitHub Pages (upstream). Then update the live survey's Q2 JS to
-      load Terra Draw from CDN.
-- [ ] **Update src/qualtrics-integration.js** -- still uses old
-      `setEmbeddedData` API; needs to use `setJSEmbeddedData`. The
-      `qualtrics/drawing-question.js` calls `setJSEmbeddedData` directly
-      (bypassing this module), so the live survey works, but the module
-      should be updated for consistency.
+- [ ] **Q3 should match Q1's view** -- show same center and zoom as the
+      drawing page, not just fit-to-bounds. Store center lat/lng via
+      setJSEmbeddedData. The review map should look like what the
+      respondent saw.
 - [ ] **Polygon validation** -- prevent degenerate polygons (straight
-      lines with < 3 distinct vertices)
-- [ ] **Redesign page structure** -- combine Q1+Q2 on same page (geocode
-      then draw inline), make Q3 review map reusable across multiple
-      question pages
+      lines with < 3 distinct vertices) before saving
 - [ ] **Overlay integration** -- test with actual census tract / ward
-      boundary GeoJSON
-- [ ] **Mobile testing** -- test Terra Draw polygon drawing on actual phones
+      boundary GeoJSON in the live survey
+- [ ] **Mobile testing** -- test Terra Draw polygon drawing on actual
+      phones (touch drawing, button sizing, scroll behavior)
 - [ ] **Multi-language testing** -- test Spanish labels, Chile geocoding
 - [ ] **End-to-end data export test** -- complete survey, download CSV
       from Qualtrics, parse WKT in R/Python, verify spatial analysis works
 - [ ] **Phase 2 (optional): Leaflet migration** -- swap Google Maps base
-      map for Leaflet + free tiles. Terra Draw's adapter pattern means
-      drawing code stays identical. Removes API key dependency.
-- [ ] **Backward compatibility for existing data** -- if researchers have
-      CSV exports with the old custom coordinate format, the R/Python
-      parse functions no longer handle it. Could add format detection
-      (if string starts with "POLYGON" -> WKT, else -> legacy) for a
-      transition period.
+      map for Leaflet + free tiles. Terra Draw adapter swap only. Removes
+      API key dependency.
+- [ ] **Q3 reusable as stimulus** -- make the review map usable on
+      multiple subsequent pages alongside slider questions (e.g., "what
+      proportion of this area is X?")
