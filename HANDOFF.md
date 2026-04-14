@@ -26,7 +26,9 @@ adapter pattern means the drawing code stays identical.
 **Delete UX changed:** Select mode + dedicated Delete button replaces
 the old InfoWindow popup. Cleaner on mobile, bigger touch targets.
 
-**Button set:** Draw / Stop / Delete / Reset / Done.
+**Button set:** Draw / Stop / Delete / Reset. No Done button --
+drawing data saves automatically when the respondent clicks the
+standard Qualtrics "Next page" button (via `addOnPageSubmit`).
 
 ### 2. WKT replaces the custom coordinate string format
 
@@ -44,9 +46,11 @@ also support the legacy format for backward compatibility with old data.
 ### 3. Single-page geocode + draw
 
 Q1 (geocode) and Q2 (draw) merged into one page. Respondent types
-address, clicks "Look up", map appears inline below, they draw, click
-Done. No cross-page embedded data transfer for lat/lon (passed directly
-in JS). Simpler code, fewer failure modes, better mobile UX.
+address, clicks "Look up", map appears inline below, they draw, then
+clicks the standard Qualtrics "Next page" button. `addOnPageSubmit`
+saves drawing data as part of Qualtrics' own submission flow. No
+cross-page embedded data transfer for lat/lon (passed directly in JS).
+Simpler code, fewer failure modes, better mobile UX.
 
 Q3 (review) remains on a separate page.
 
@@ -70,9 +74,13 @@ map renders.
 
 ### 5. Qualtrics embedded data timing
 
-`setJSEmbeddedData()` needs time to flush before `clickNextButton()`
-fires. Without a delay, the next page's `getJSEmbeddedData()` returns
-empty. Fix: `setTimeout(function() { clickNextButton(); }, 500)`.
+`setJSEmbeddedData()` called from a custom button handler needs time
+to flush before `clickNextButton()`. The fix: use `addOnPageSubmit`
+to save data as part of Qualtrics' own page submission flow (triggered
+by the standard Next button). This eliminates the timing issue entirely.
+For cases where `clickNextButton()` is called programmatically (e.g.,
+the old two-page `drawing-question.js`), a 500ms `setTimeout` delay
+is needed before the call.
 
 ### 6. Prior decisions preserved
 
@@ -108,9 +116,9 @@ empty. Fix: `setTimeout(function() { clickNextButton(); }, 500)`.
 ### Qualtrics wiring (`qualtrics/`)
 
 - **`geocode-and-draw-question.js`** -- NEW. Combined single-page flow:
-  address input + geocode + map + Terra Draw + Done. No cross-page data
-  transfer for lat/lon. 500ms delay before `clickNextButton()` to let
-  Qualtrics flush embedded data.
+  address input + geocode + map + Terra Draw. No Done button -- uses
+  `addOnPageSubmit` to save drawing data when the respondent clicks the
+  standard Qualtrics Next button. No cross-page data transfer for lat/lon.
 
 - **`drawing-question.js`** -- Updated for Terra Draw (kept for surveys
   using the old two-page layout).
@@ -220,6 +228,9 @@ resetDrawing(ctx)                 // clear all features
 getFeatures(ctx)                  // -> GeoJSON polygon features array
 collectResult(ctx)                // -> { coordinates: WKT, zoom: number }
 createButtons(ctx, labels)        // -> { draw, stop, delete, reset, done }
+// Note: the combined question JS omits the Done button and uses
+// addOnPageSubmit instead. The Done button is still available for
+// other wiring patterns.
 ```
 
 ### Qualtrics "New Survey Taking Experience" gotchas
@@ -228,7 +239,9 @@ createButtons(ctx, labels)        // -> { draw, stop, delete, reset, done }
    `setJSEmbeddedData` / `getJSEmbeddedData`.
 2. Piped text does NOT work for JS-set embedded data -- must use
    `getJSEmbeddedData` on the consuming page.
-3. `setJSEmbeddedData` needs ~500ms before `clickNextButton()` to flush.
+3. `setJSEmbeddedData` from custom handlers needs ~500ms before
+   `clickNextButton()`. Better: use `addOnPageSubmit` so data saves
+   as part of Qualtrics' own submission flow (no timing issue).
 4. Preview mode destroys iframes between pages -- only published
    survey works for cross-page data.
 5. CKEditor strips script tags -- load scripts dynamically.
