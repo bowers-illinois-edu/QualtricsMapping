@@ -153,7 +153,11 @@ var mockGoogle = {
       addListener: jest.fn(),
       // Stores listeners so tests can trigger them
       _listeners: {},
-      addListenerOnce: jest.fn(),
+      // Fire the callback synchronously so tests don't need async.
+      // In the browser, Google Maps fires 'idle' once the map renders.
+      addListenerOnce: jest.fn(function (target, event, callback) {
+        callback();
+      }),
     },
     Data: jest.fn(function () {
       return {

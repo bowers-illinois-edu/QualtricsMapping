@@ -91,9 +91,13 @@
       ],
     });
 
-    draw.start();
-    // Start in drawing mode so the respondent can begin immediately
-    draw.setMode("polygon");
+    // Wait for Google Maps to finish rendering before starting Terra Draw.
+    // The adapter attaches event listeners to the map's internal DOM, which
+    // does not exist until the map fires its first 'idle' event.
+    google.maps.event.addListenerOnce(map, "idle", function () {
+      draw.start();
+      draw.setMode("polygon");
+    });
 
     return {
       map: map,

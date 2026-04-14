@@ -70,6 +70,9 @@ describe("map canvas creation", function () {
       zoom: 14,
     });
     expect(ctx.draw).toBeDefined();
+    // In the browser, draw.start() is deferred until the map's idle event.
+    // In tests, the mock fires idle synchronously via addListenerOnce,
+    // so the draw should be started.
     expect(ctx.draw._started).toBe(true);
   });
 
